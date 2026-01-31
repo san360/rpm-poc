@@ -72,13 +72,18 @@ source .env.generated
 On systems that need to access the repository:
 
 ```bash
-# 1. Install the plugin and Azure CLI
-sudo dnf install dnf-plugin-azure-auth azure-cli
+# 1. Install the plugin (azure-cli is optional but recommended)
+sudo dnf install dnf-plugin-azure-auth
 
-# 2. Login to Azure
+# 2. Authentication Options:
+#    Option A: Use Azure CLI (recommended for interactive systems)
+sudo dnf install azure-cli
 az login                      # Interactive login
 # OR
 az login --identity           # Managed Identity (Azure VMs)
+
+#    Option B: Use pre-generated token (for bootstrapping/containers)
+export DNF_PLUGIN_AZURE_AUTH_TOKEN="<your-azure-ad-token>"
 
 # 3. Configure the plugin (/etc/dnf/plugins/azure_auth.conf)
 sudo tee -a /etc/dnf/plugins/azure_auth.conf << 'EOF'

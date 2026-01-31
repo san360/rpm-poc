@@ -212,22 +212,27 @@ Failed: 0
 ### Step 4.2: Test with Docker (Pre-generated Token)
 
 ```bash
+# Ensure environment is loaded
+source .env.generated
+
 # Generate Azure AD token
 TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
 
 # Test with Rocky Linux container
+# Note: We pass AZURE_STORAGE_ACCOUNT as an env var so it's available inside the container
 docker run --rm -it \
   -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
+  -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
   -v $(pwd)/packages:/packages:ro \
-  rockylinux:9 bash -c "
-    # Install the Azure AD auth plugin
+  rockylinux:9 bash -c '
+    # Install the Azure AD auth plugin (no azure-cli dependency needed - using pre-generated token)
     dnf install -y /packages/dnf-plugin-azure-auth-*.rpm
     
-    # Configure the plugin
-    echo '[azure-rpm-repo]' >> /etc/dnf/plugins/azure_auth.conf
+    # Configure the plugin to enable it for our repo
+    echo "[azure-rpm-repo]" >> /etc/dnf/plugins/azure_auth.conf
     
-    # Create repo file
-    cat > /etc/yum.repos.d/azure.repo << 'EOF'
+    # Create repo file - use double quotes to expand AZURE_STORAGE_ACCOUNT
+    cat > /etc/yum.repos.d/azure.repo << EOF
 [azure-rpm-repo]
 name=Azure Blob RPM Repository
 baseurl=https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/rpm-repo/el9/x86_64
@@ -236,22 +241,26 @@ gpgcheck=0
 EOF
     
     # Test repository
-    echo '=== Refreshing Repository Cache ==='
+    echo "=== Refreshing Repository Cache ==="
     dnf makecache
     
-    echo ''
-    echo '=== Available Packages ==='
-    dnf --disablerepo='*' --enablerepo='azure-rpm-repo' list available
+    echo ""
+    echo "=== Available Packages ==="
+    dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available
     
-    echo ''
-    echo '=== Installing hello-azure ==='
+    echo ""
+    echo "=== Installing hello-azure ==="
     dnf install -y hello-azure
     
-    echo ''
-    echo '=== Running hello-azure ==='
+    echo ""
+    echo "=== Running hello-azure ==="
     hello-azure --info
-"
+'
 ```
+
+> **Note**: The container uses a pre-generated Azure AD token passed via `DNF_PLUGIN_AZURE_AUTH_TOKEN` 
+> environment variable. This avoids the need for `azure-cli` inside the container. The plugin 
+> detects this token and uses it for authentication.
 
 ---
 

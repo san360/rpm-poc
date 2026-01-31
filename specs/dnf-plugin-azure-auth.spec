@@ -13,7 +13,10 @@ Source0:        azure_auth.py
 Source1:        azure_auth.conf
 %global debug_package %{nil}
 Requires:       python3-dnf
-Requires:       azure-cli
+# azure-cli is optional - tokens can be passed via DNF_PLUGIN_AZURE_AUTH_TOKEN env var
+# On systems with azure-cli: token is fetched automatically via 'az account get-access-token'
+# Without azure-cli: set DNF_PLUGIN_AZURE_AUTH_TOKEN environment variable before using dnf
+Recommends:     azure-cli
 # No BuildRequires needed - just copying Python files
 BuildArch:      noarch
 
@@ -33,19 +36,30 @@ Features:
 # No prep needed - sources are standalone files
 
 %install
-# Use /usr/lib/python3/dist-packages for Debian compatibility
-# On RHEL, dnf-plugins are typically in /usr/lib/python3.x/site-packages/dnf-plugins/
-mkdir -p %{buildroot}/usr/lib/python3/dist-packages/dnf-plugins/
+# Install to dnf's plugin directory
+# DNF looks for plugins in /usr/lib/pythonX.Y/site-packages/dnf-plugins/
+# We use /usr/lib/python3/site-packages which is a common symlink target
+# that works on RHEL 8/9, Rocky, AlmaLinux, and Fedora
+mkdir -p %{buildroot}/usr/lib/python3/site-packages/dnf-plugins/
 mkdir -p %{buildroot}%{_sysconfdir}/dnf/plugins/
-cp %{SOURCE0} %{buildroot}/usr/lib/python3/dist-packages/dnf-plugins/
+cp %{SOURCE0} %{buildroot}/usr/lib/python3/site-packages/dnf-plugins/
 cp %{SOURCE1} %{buildroot}%{_sysconfdir}/dnf/plugins/azure_auth.conf
+
+%post
+# Create symlinks to the versioned Python site-packages if needed
+# This ensures the plugin is found regardless of Python version
+PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+TARGET_DIR="/usr/lib/python${PYTHON_VERSION}/site-packages/dnf-plugins"
+if [ -d "$TARGET_DIR" ] && [ ! -f "$TARGET_DIR/azure_auth.py" ]; then
+    ln -sf /usr/lib/python3/site-packages/dnf-plugins/azure_auth.py "$TARGET_DIR/azure_auth.py" 2>/dev/null || true
+fi
 
 %files
 %defattr(-,root,root)
 %config(noreplace) %{_sysconfdir}/dnf/plugins/azure_auth.conf
-/usr/lib/python3/dist-packages/dnf-plugins/azure_auth.py
+/usr/lib/python3/site-packages/dnf-plugins/azure_auth.py
 
 %changelog
-* Fri Jan 31 2026 RPM POC <rpm-poc@example.com> - 0.1.0-1
+* Sat Jan 31 2026 RPM POC <rpm-poc@example.com> - 0.1.0-1
 - Initial package for RPM repository POC
 - Based on Metaswitch/dnf-plugin-azure-auth

@@ -153,7 +153,9 @@ upload_packages() {
     for rpm_file in "$LOCAL_PACKAGES_DIR"/*.rpm; do
         if [[ -f "$rpm_file" ]]; then
             local filename=$(basename "$rpm_file")
-            local blob_path="${REPO_PATH}/Packages/${filename}"
+            # Upload RPMs to the root of REPO_PATH (alongside repodata)
+            # This matches where createrepo expects them (location href="package.rpm")
+            local blob_path="${REPO_PATH}/${filename}"
             
             log_info "Uploading: $filename -> $blob_path"
             upload_file "$rpm_file" "$blob_path" "application/x-rpm"
