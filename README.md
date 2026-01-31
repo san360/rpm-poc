@@ -18,6 +18,7 @@ rpm-poc/
 ├── azure-pipelines.yml                 # Azure DevOps CI/CD pipeline
 ├── docker-compose.yml                  # Docker test environment
 ├── Dockerfile.rpm-builder              # Docker image for building RPMs
+├── Dockerfile.rpm-test                 # Rocky Linux 9 + Azure CLI test image
 ├── scripts/
 │   ├── create-azure-storage.sh         # Create Azure Storage with RBAC
 │   ├── build-rpm-local.sh              # Local RPM build script

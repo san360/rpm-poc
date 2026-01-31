@@ -1,0 +1,91 @@
+#===============================================================================
+# Rocky Linux 9 with Azure CLI - RPM Repository Test Image
+#===============================================================================
+# This image provides a pre-configured environment for testing the Azure Blob
+# Storage RPM repository with Azure AD authentication.
+#
+# Build:
+#   docker build -f Dockerfile.rpm-test -t rpm-repo-test:rocky9 .
+#
+# Usage with interactive login (from workstation):
+#   docker run --rm -it rpm-repo-test:rocky9
+#   > az login
+#   > dnf install hello-azure
+#
+# Usage with pre-generated token:
+#   TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+#   docker run --rm -it \
+#     -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
+#     -e AZURE_STORAGE_ACCOUNT="your-storage-account" \
+#     rpm-repo-test:rocky9
+#===============================================================================
+
+FROM rockylinux:9
+
+LABEL maintainer="RPM POC <rpm-poc@example.com>"
+LABEL description="Rocky Linux 9 with Azure CLI for testing Azure Blob RPM repositories"
+
+# Install Azure CLI
+# Note: Microsoft's yum repo only has x86_64 packages, so we use pip for cross-arch support
+# On x86_64 systems, you can use: dnf config-manager --add-repo https://packages.microsoft.com/yumrepos/azure-cli
+RUN dnf install -y python3-pip && \
+    pip3 install azure-cli && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf /root/.cache/pip
+
+# Set working directory
+WORKDIR /root
+
+# Create directory for local packages
+RUN mkdir -p /packages
+
+# Copy the dnf-plugin-azure-auth RPM (build with packages available)
+# At runtime, mount packages with -v $(pwd)/packages:/packages:ro
+COPY packages/dnf-plugin-azure-auth-*.rpm /packages/
+
+# Install the plugin
+RUN dnf install -y /packages/dnf-plugin-azure-auth-*.rpm && dnf clean all
+
+# Create a setup script for easy configuration
+RUN cat > /usr/local/bin/setup-azure-repo.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+
+STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:-}"
+REPO_PATH="${REPO_PATH:-el9/x86_64}"
+
+if [[ -z "$STORAGE_ACCOUNT" ]]; then
+    echo "Error: AZURE_STORAGE_ACCOUNT environment variable not set"
+    echo "Usage: AZURE_STORAGE_ACCOUNT=your-account setup-azure-repo.sh"
+    exit 1
+fi
+
+# Configure the plugin for our repo
+if ! grep -q "^\[azure-rpm-repo\]" /etc/dnf/plugins/azure_auth.conf 2>/dev/null; then
+    echo "[azure-rpm-repo]" >> /etc/dnf/plugins/azure_auth.conf
+    echo "Added [azure-rpm-repo] to plugin config"
+fi
+
+# Create repo file
+cat > /etc/yum.repos.d/azure-rpm.repo << EOF
+[azure-rpm-repo]
+name=Azure Blob RPM Repository
+baseurl=https://${STORAGE_ACCOUNT}.blob.core.windows.net/rpm-repo/${REPO_PATH}
+enabled=1
+gpgcheck=0
+EOF
+
+echo "Repository configured:"
+echo "  Storage Account: $STORAGE_ACCOUNT"
+echo "  Repo Path: $REPO_PATH"
+echo ""
+echo "Run 'dnf makecache' to refresh, then 'dnf install hello-azure' to test"
+SCRIPT
+
+RUN chmod +x /usr/local/bin/setup-azure-repo.sh
+
+# Set working directory
+WORKDIR /root
+
+# Default command - show help
+CMD ["/bin/bash", "-c", "echo '=== Azure Blob RPM Repository Test Container ===' && echo '' && echo 'Quick Start:' && echo '  1. Login: az login (or use DNF_PLUGIN_AZURE_AUTH_TOKEN env var)' && echo '  2. Setup: AZURE_STORAGE_ACCOUNT=xxx setup-azure-repo.sh' && echo '  3. Test:  dnf install hello-azure' && echo '' && exec /bin/bash"]

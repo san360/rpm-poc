@@ -209,29 +209,71 @@ Failed: 0
 [SUCCESS] All tests passed! Repository is ready for use.
 ```
 
-### Step 4.2: Test with Docker (Pre-generated Token)
+### Step 4.2: Test with Docker (Using Pre-built Test Image)
+
+We provide a Docker image with Azure CLI pre-installed for more realistic testing.
+
+#### Build the Test Image
 
 ```bash
-# Ensure environment is loaded
+# Build the test image with Azure CLI and the plugin pre-installed
+docker build -f Dockerfile.rpm-test -t rpm-repo-test:rocky9 .
+```
+
+#### Option A: Interactive Login (Recommended for Development)
+
+```bash
 source .env.generated
 
-# Generate Azure AD token
+# Run container interactively
+docker run --rm -it \
+  -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
+  -v $(pwd)/packages:/packages:ro \
+  rpm-repo-test:rocky9
+
+# Inside container:
+az login                           # Opens browser for authentication
+setup-azure-repo.sh                # Configures the repository
+dnf install -y hello-azure         # Install from Azure Blob
+hello-azure --info                 # Verify installation
+```
+
+#### Option B: Pre-generated Token (CI/CD or Headless)
+
+```bash
+source .env.generated
+
+# Generate Azure AD token on host
 TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
 
-# Test with Rocky Linux container
-# Note: We pass AZURE_STORAGE_ACCOUNT as an env var so it's available inside the container
+# Run with pre-generated token
+docker run --rm -it \
+  -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
+  -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
+  -v $(pwd)/packages:/packages:ro \
+  rpm-repo-test:rocky9 bash -c '
+    setup-azure-repo.sh
+    dnf makecache
+    dnf install -y hello-azure
+    hello-azure --info
+'
+```
+
+### Step 4.3: Test with Plain Rocky Linux (Minimal - Token Only)
+
+For scenarios where you want a minimal image without Azure CLI:
+
+```bash
+source .env.generated
+TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+
 docker run --rm -it \
   -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
   -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
   -v $(pwd)/packages:/packages:ro \
   rockylinux:9 bash -c '
-    # Install the Azure AD auth plugin (no azure-cli dependency needed - using pre-generated token)
     dnf install -y /packages/dnf-plugin-azure-auth-*.rpm
-    
-    # Configure the plugin to enable it for our repo
     echo "[azure-rpm-repo]" >> /etc/dnf/plugins/azure_auth.conf
-    
-    # Create repo file - use double quotes to expand AZURE_STORAGE_ACCOUNT
     cat > /etc/yum.repos.d/azure.repo << EOF
 [azure-rpm-repo]
 name=Azure Blob RPM Repository
@@ -239,28 +281,13 @@ baseurl=https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/rpm-repo/el9/x86_
 enabled=1
 gpgcheck=0
 EOF
-    
-    # Test repository
-    echo "=== Refreshing Repository Cache ==="
-    dnf makecache
-    
-    echo ""
-    echo "=== Available Packages ==="
-    dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available
-    
-    echo ""
-    echo "=== Installing hello-azure ==="
     dnf install -y hello-azure
-    
-    echo ""
-    echo "=== Running hello-azure ==="
     hello-azure --info
 '
 ```
 
-> **Note**: The container uses a pre-generated Azure AD token passed via `DNF_PLUGIN_AZURE_AUTH_TOKEN` 
-> environment variable. This avoids the need for `azure-cli` inside the container. The plugin 
-> detects this token and uses it for authentication.
+> **Note**: The plain Rocky Linux method requires a pre-generated token since Azure CLI 
+> is not installed. The test image with Azure CLI supports both methods.
 
 ---
 
@@ -283,22 +310,23 @@ Run the complete pipeline with a single command:
 ### For RHEL/Rocky Linux/AlmaLinux VMs
 
 ```bash
-# 1. Install prerequisites
+# 1. Install Azure CLI from Microsoft repository
+sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+sudo dnf config-manager --add-repo https://packages.microsoft.com/yumrepos/azure-cli
 sudo dnf install -y azure-cli
 
-# 2. Install the Azure AD auth plugin from your repository
-# (First time - you'll need to manually download or have another way to get it)
-# Option A: Download directly with curl + token
-TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
-curl -H "Authorization: Bearer $TOKEN" -H "x-ms-version: 2022-11-02" \
-  "https://STORAGE_ACCOUNT.blob.core.windows.net/rpm-repo/el9/x86_64/Packages/dnf-plugin-azure-auth-0.1.0-1.noarch.rpm" \
-  -o /tmp/dnf-plugin-azure-auth.rpm
-sudo dnf install -y /tmp/dnf-plugin-azure-auth.rpm
-
-# 3. Login to Azure
-az login                      # Interactive
+# 2. Login to Azure
+az login                      # Interactive login
 # OR
 az login --identity           # Managed Identity on Azure VMs
+
+# 3. Install the Azure AD auth plugin from your repository
+# Download directly with curl + token
+TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+curl -H "Authorization: Bearer $TOKEN" -H "x-ms-version: 2022-11-02" \
+  "https://STORAGE_ACCOUNT.blob.core.windows.net/rpm-repo/el9/x86_64/dnf-plugin-azure-auth-0.1.0-1.noarch.rpm" \
+  -o /tmp/dnf-plugin-azure-auth.rpm
+sudo dnf install -y /tmp/dnf-plugin-azure-auth.rpm
 
 # 4. Configure the plugin
 sudo tee -a /etc/dnf/plugins/azure_auth.conf << 'EOF'
