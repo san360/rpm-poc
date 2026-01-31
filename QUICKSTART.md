@@ -6,32 +6,90 @@ This guide walks you through the complete process of setting up and testing the 
 
 ---
 
+## Quick Command Reference
+
+All commands at a glance for experienced users:
+
+```bash
+# === PREREQUISITES ===
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash    # Install Azure CLI (Debian/Ubuntu)
+sudo apt-get install -y rpm createrepo-c                   # Install RPM build tools
+az login                                                   # Login to Azure
+az account set --subscription "YOUR_SUBSCRIPTION"          # Set subscription
+
+# === PHASE 1: INFRASTRUCTURE ===
+cd /mnt/c/dev/rpm-poc
+chmod +x scripts/*.sh                                      # Make scripts executable
+./scripts/create-azure-storage.sh -g rg-rpm-poc -l eastus  # Create Azure Storage with RBAC
+source .env.generated                                      # Load environment variables
+
+# === PHASE 2: BUILD ===
+./scripts/build-rpm-local.sh all                           # Build all RPM packages
+ls packages/*.rpm                                          # Verify built packages
+
+# === PHASE 3: UPLOAD ===
+./scripts/upload-to-azure.sh                               # Upload packages to Azure Blob
+
+# === PHASE 4: TEST ===
+./scripts/test-repository.sh -s $AZURE_STORAGE_ACCOUNT     # Test repository access
+
+# Docker Test (with pre-built image)
+docker build -f Dockerfile.rpm-test -t rpm-repo-test:rocky9 .
+TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+docker run --rm -it \
+  -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
+  -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
+  rpm-repo-test:rocky9 bash -c 'setup-azure-repo.sh && dnf install -y hello-azure && hello-azure --info'
+
+# === PHASE 5: END-TO-END ===
+./scripts/e2e-test.sh -g rg-rpm-poc                        # Full pipeline test
+
+# === CLEANUP ===
+az group delete --name rg-rpm-poc --yes --no-wait          # Delete all resources
+```
+
+---
+
 ## Prerequisites
 
 ### 1. Install Required Tools
 
 ```bash
-# Update system
+# Update system package lists
 sudo apt-get update
 
-# Install Azure CLI
+# Install Azure CLI - Microsoft's command-line tool for Azure management
+# This downloads and runs the official Microsoft installation script
 curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
 # Install RPM build tools (Debian/Ubuntu)
-# Note: rpmbuild is included in the 'rpm' package
+# - rpm: RPM package manager and rpmbuild tool
+# - createrepo-c: Creates repository metadata (repomd.xml, primary.xml, etc.)
 sudo apt-get install -y rpm createrepo-c
 
-# Verify installations
-az --version
-rpmbuild --version
+# Verify installations - check versions to confirm tools are installed
+az --version          # Should show Azure CLI version (e.g., 2.x.x)
+rpmbuild --version    # Should show rpmbuild version
+createrepo_c --version # Should show createrepo_c version
 ```
 
 ### 2. Login to Azure
 
 ```bash
+# Login to Azure - opens browser for authentication
+# After login, your credentials are cached locally
 az login
+
+# List all subscriptions you have access to
+# Useful to find the correct subscription name/ID
 az account list --output table
+
+# Set the active subscription for all subsequent commands
+# Replace with your subscription name or ID from the list above
 az account set --subscription "YOUR_SUBSCRIPTION_NAME_OR_ID"
+
+# Verify the active subscription
+az account show --output table
 ```
 
 ---
@@ -41,23 +99,30 @@ az account set --subscription "YOUR_SUBSCRIPTION_NAME_OR_ID"
 ### Step 1.1: Create Azure Storage Account
 
 ```bash
+# Navigate to the project directory
 cd /mnt/c/dev/rpm-poc
 
-# Make scripts executable
+# Make all scripts executable (required once after cloning)
 chmod +x scripts/*.sh
 
 # Create storage account with RBAC (Azure AD authentication)
+# Options:
+#   -g, --resource-group  : Azure resource group name (created if doesn't exist)
+#   -l, --location        : Azure region (e.g., eastus, westus2, westeurope)
+#   -s, --storage-account : Custom storage account name (optional, auto-generated if omitted)
 ./scripts/create-azure-storage.sh \
   --resource-group rg-rpm-poc \
   --location eastus
 ```
 
-The script will:
-- Create a resource group (if needed)
-- Create a storage account with a unique name
-- Create a blob container
-- Assign **Storage Blob Data Contributor** role to your user
-- Generate a `.env.generated` file with configuration
+**What this script does:**
+- Creates a resource group (if it doesn't exist)
+- Creates a storage account with a unique name (e.g., `rpmrepopoc37333`)
+- Creates a blob container named `rpm-repo`
+- Disables anonymous public access (security best practice)
+- Assigns **Storage Blob Data Contributor** role to your Azure AD user
+- Creates placeholder directories for EL8 and EL9 repositories
+- Generates `.env.generated` file with all configuration values
 
 ### Step 1.2: Verify Storage Account
 
@@ -83,11 +148,17 @@ Required Role:     Storage Blob Data Reader (for clients)
 ### Step 1.3: Load Environment
 
 ```bash
-# Source the generated environment file
+# Source the generated environment file to set variables in current shell
+# This sets: AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_CONTAINER, AZURE_RESOURCE_GROUP, etc.
 source .env.generated
 
-# Verify
+# Verify the environment variables are set correctly
 echo "Storage Account: $AZURE_STORAGE_ACCOUNT"
+echo "Container: $AZURE_STORAGE_CONTAINER"
+echo "Resource Group: $AZURE_RESOURCE_GROUP"
+
+# View all generated environment variables
+cat .env.generated
 ```
 
 ---
@@ -97,8 +168,21 @@ echo "Storage Account: $AZURE_STORAGE_ACCOUNT"
 ### Step 2.1: Build All Packages
 
 ```bash
-# Build hello-azure and dnf-plugin-azure-auth
+# Build all RPM packages defined in specs/ directory
+# This command performs: install prerequisites, setup environment, build, create repo metadata
+# Available commands: install, setup, build, repo, clean, all
 ./scripts/build-rpm-local.sh all
+
+# Alternative: Build individual packages
+./scripts/build-rpm-local.sh build specs/hello-azure.spec           # Build only hello-azure
+./scripts/build-rpm-local.sh build specs/dnf-plugin-azure-auth.spec # Build only the plugin
+
+# Alternative: Run individual steps
+./scripts/build-rpm-local.sh install   # Install rpmbuild prerequisites
+./scripts/build-rpm-local.sh setup     # Setup ~/rpmbuild directory structure
+./scripts/build-rpm-local.sh build     # Build all specs
+./scripts/build-rpm-local.sh repo      # Create repository metadata
+./scripts/build-rpm-local.sh clean     # Clean build artifacts
 ```
 
 **Expected Output:**
@@ -124,11 +208,23 @@ Package Summary:
 ### Step 2.2: Verify Built Packages
 
 ```bash
+# List the built RPM packages
 ls -la packages/
-# Should show:
-# hello-azure-1.0.0-1.noarch.rpm
-# dnf-plugin-azure-auth-0.1.0-1.noarch.rpm
-# repodata/
+# Expected output:
+#   hello-azure-1.0.0-1.noarch.rpm        - Sample test package
+#   dnf-plugin-azure-auth-0.1.0-1.noarch.rpm - Azure AD authentication plugin
+#   repodata/                              - Repository metadata directory
+
+# Inspect package details
+rpm -qip packages/hello-azure-1.0.0-1.noarch.rpm           # Package info
+rpm -qlp packages/hello-azure-1.0.0-1.noarch.rpm           # List files in package
+
+# Inspect plugin package dependencies
+rpm -qpR packages/dnf-plugin-azure-auth-0.1.0-1.noarch.rpm # List requirements
+
+# Verify repository metadata was created
+ls packages/repodata/
+# Expected: repomd.xml, primary.xml.gz, filelists.xml.gz, other.xml.gz, etc.
 ```
 
 ---
@@ -138,12 +234,26 @@ ls -la packages/
 ### Step 3.1: Upload Packages
 
 ```bash
-# Ensure environment is loaded
+# Ensure environment variables are loaded
 source .env.generated
 
-# Upload packages using Azure AD authentication
+# Upload packages using Azure AD authentication (no SAS tokens needed)
+# This uploads RPMs and repodata to: ${AZURE_STORAGE_ACCOUNT}/${AZURE_STORAGE_CONTAINER}/el9/x86_64/
 ./scripts/upload-to-azure.sh
+
+# Alternative: Specify options explicitly
+./scripts/upload-to-azure.sh \
+  --storage-account $AZURE_STORAGE_ACCOUNT \
+  --container rpm-repo \
+  --repo-path el9/x86_64 \
+  --packages-dir ./packages
 ```
+
+**What this script does:**
+- Verifies Azure AD authentication is working
+- Uploads all `*.rpm` files from `packages/` directory
+- Uploads repository metadata from `packages/repodata/`
+- Uses Azure AD Bearer tokens (not SAS tokens) for authentication
 
 **Expected Output:**
 ```
@@ -162,12 +272,29 @@ source .env.generated
 ### Step 3.2: Verify Upload
 
 ```bash
-# List uploaded blobs (using Azure AD)
+# List all uploaded blobs (using Azure AD authentication)
 az storage blob list \
   --account-name $AZURE_STORAGE_ACCOUNT \
   --container-name $AZURE_STORAGE_CONTAINER \
   --auth-mode login \
   --output table
+
+# List only the RPM packages
+az storage blob list \
+  --account-name $AZURE_STORAGE_ACCOUNT \
+  --container-name $AZURE_STORAGE_CONTAINER \
+  --prefix "el9/x86_64/" \
+  --auth-mode login \
+  --query "[?ends_with(name, '.rpm')].{Name:name, Size:properties.contentLength}" \
+  --output table
+
+# Test direct HTTP access with Azure AD token
+TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+curl -s -o /dev/null -w "%{http_code}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "x-ms-version: 2022-11-02" \
+  "https://$AZURE_STORAGE_ACCOUNT.blob.core.windows.net/$AZURE_STORAGE_CONTAINER/el9/x86_64/repodata/repomd.xml"
+# Expected: 200 (success)
 ```
 
 ---
@@ -177,7 +304,19 @@ az storage blob list \
 ### Step 4.1: Run Repository Tests
 
 ```bash
+# Run automated repository tests
+# Options:
+#   -s, --storage-account : Storage account name
+#   -c, --container       : Container name (default: rpm-repo)
+#   -r, --repo-path       : Repository path (default: el9/x86_64)
+#   -v, --verbose         : Show detailed output
 ./scripts/test-repository.sh -s $AZURE_STORAGE_ACCOUNT -v
+
+# The script tests:
+# - Azure AD token acquisition
+# - repomd.xml accessibility (HTTP 200)
+# - RPM package listing
+# - Anonymous access blocked (security verification)
 ```
 
 **Expected Output:**
@@ -217,63 +356,112 @@ We provide a Docker image with Azure CLI pre-installed for more realistic testin
 
 ```bash
 # Build the test image with Azure CLI and the plugin pre-installed
+# Image includes:
+#   - Rocky Linux 9 base
+#   - Azure CLI (pip installed for cross-architecture support)
+#   - dnf-plugin-azure-auth pre-installed
+#   - setup-azure-repo.sh helper script
 docker build -f Dockerfile.rpm-test -t rpm-repo-test:rocky9 .
+
+# Verify the image was built
+docker images rpm-repo-test:rocky9
 ```
 
 #### Option A: Interactive Login (Recommended for Development)
 
 ```bash
+# Load environment variables
 source .env.generated
 
-# Run container interactively
+# Run container interactively with Azure storage account configured
 docker run --rm -it \
   -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
-  -v $(pwd)/packages:/packages:ro \
   rpm-repo-test:rocky9
 
-# Inside container:
-az login                           # Opens browser for authentication
-setup-azure-repo.sh                # Configures the repository
-dnf install -y hello-azure         # Install from Azure Blob
-hello-azure --info                 # Verify installation
+# === Inside the container ===
+
+# Login to Azure (opens browser for authentication)
+az login
+
+# Configure the repository using the helper script
+# This creates /etc/yum.repos.d/azure-rpm.repo and configures the plugin
+setup-azure-repo.sh
+
+# Refresh repository cache
+dnf makecache
+
+# List available packages from Azure repo
+dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available
+
+# Install the test package from Azure Blob Storage
+dnf install -y hello-azure
+
+# Run the installed package to verify
+hello-azure --info
+
+# Exit the container
+exit
 ```
 
 #### Option B: Pre-generated Token (CI/CD or Headless)
 
 ```bash
+# Load environment variables
 source .env.generated
 
-# Generate Azure AD token on host
+# Generate Azure AD token on host machine
+# This token is valid for ~1 hour and grants access to Azure Blob Storage
 TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
 
-# Run with pre-generated token
+# Verify token was obtained (should show JWT header starting with 'eyJ')
+echo "${TOKEN:0:10}..."
+
+# Run container with pre-generated token (no interactive login needed)
+# DNF_PLUGIN_AZURE_AUTH_TOKEN: Plugin uses this token instead of calling az cli
+# AZURE_STORAGE_ACCOUNT: Used by setup-azure-repo.sh to configure baseurl
 docker run --rm -it \
   -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
   -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
-  -v $(pwd)/packages:/packages:ro \
   rpm-repo-test:rocky9 bash -c '
     setup-azure-repo.sh
     dnf makecache
+    dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available
     dnf install -y hello-azure
     hello-azure --info
 '
 ```
 
+> **Note**: Pre-generated tokens are ideal for:
+> - CI/CD pipelines where interactive login isn't possible
+> - Headless servers without browser access
+> - Bootstrapping new VMs before Azure CLI is installed
+
 ### Step 4.3: Test with Plain Rocky Linux (Minimal - Token Only)
 
-For scenarios where you want a minimal image without Azure CLI:
+For scenarios where you want a minimal image without Azure CLI pre-installed:
 
 ```bash
+# Load environment and generate token
 source .env.generated
 TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
 
+# Run with plain Rocky Linux (no Azure CLI)
+# This demonstrates the bootstrap scenario where you install the plugin first
 docker run --rm -it \
   -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
   -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
   -v $(pwd)/packages:/packages:ro \
   rockylinux:9 bash -c '
+    # Install the Azure AD authentication plugin from local mount
+    # The plugin has no hard dependencies on azure-cli
     dnf install -y /packages/dnf-plugin-azure-auth-*.rpm
+    
+    # Configure the plugin to enable Azure AD auth for our repo
+    # This adds the repo ID to the plugin configuration
     echo "[azure-rpm-repo]" >> /etc/dnf/plugins/azure_auth.conf
+    
+    # Create the repository configuration file
+    # baseurl points to your Azure Blob Storage container
     cat > /etc/yum.repos.d/azure.repo << EOF
 [azure-rpm-repo]
 name=Azure Blob RPM Repository
@@ -281,13 +469,16 @@ baseurl=https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/rpm-repo/el9/x86_
 enabled=1
 gpgcheck=0
 EOF
+
+    # Test: refresh metadata and install package
+    dnf makecache
     dnf install -y hello-azure
     hello-azure --info
 '
 ```
 
-> **Note**: The plain Rocky Linux method requires a pre-generated token since Azure CLI 
-> is not installed. The test image with Azure CLI supports both methods.
+> **Note**: This method requires a pre-generated token since Azure CLI is not installed.
+> The plugin detects `DNF_PLUGIN_AZURE_AUTH_TOKEN` and uses it for authentication.
 
 ---
 
@@ -296,11 +487,20 @@ EOF
 Run the complete pipeline with a single command:
 
 ```bash
-# Full E2E test (builds, uploads, and tests)
+# Full E2E test - creates infrastructure, builds, uploads, and tests
+# Options:
+#   -g, --resource-group  : Azure resource group (required if creating storage)
+#   -s, --storage-account : Use existing storage account
+#   --skip-storage        : Skip storage creation (use with -s)
+#   --skip-build          : Skip package building
+#   --skip-upload         : Skip package upload
 ./scripts/e2e-test.sh -g rg-rpm-poc
 
-# Or with existing storage account (skip storage creation)
+# Use existing storage account (skip storage creation)
 ./scripts/e2e-test.sh -s $AZURE_STORAGE_ACCOUNT --skip-storage
+
+# Skip build (use pre-built packages)
+./scripts/e2e-test.sh -s $AZURE_STORAGE_ACCOUNT --skip-storage --skip-build
 ```
 
 ---
@@ -309,31 +509,67 @@ Run the complete pipeline with a single command:
 
 ### For RHEL/Rocky Linux/AlmaLinux VMs
 
+Complete setup instructions for configuring a client VM to use the Azure Blob RPM repository:
+
 ```bash
-# 1. Install Azure CLI from Microsoft repository
+# ============================================================
+# STEP 1: Install Azure CLI from Microsoft repository
+# ============================================================
+# Import Microsoft's GPG key for package verification
 sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+
+# Add Microsoft's Azure CLI repository
 sudo dnf config-manager --add-repo https://packages.microsoft.com/yumrepos/azure-cli
+
+# Install Azure CLI
 sudo dnf install -y azure-cli
 
-# 2. Login to Azure
-az login                      # Interactive login
-# OR
-az login --identity           # Managed Identity on Azure VMs
+# Verify installation
+az --version
 
-# 3. Install the Azure AD auth plugin from your repository
-# Download directly with curl + token
+# ============================================================
+# STEP 2: Login to Azure
+# ============================================================
+# Option A: Interactive login (opens browser)
+az login
+
+# Option B: Managed Identity login (Azure VMs only - no credentials needed)
+az login --identity
+
+# Verify login
+az account show
+
+# ============================================================
+# STEP 3: Install the Azure AD auth plugin
+# ============================================================
+# Get an Azure AD token for storage access
 TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+
+# Download the plugin RPM directly using the token
+# Replace STORAGE_ACCOUNT with your actual storage account name
 curl -H "Authorization: Bearer $TOKEN" -H "x-ms-version: 2022-11-02" \
   "https://STORAGE_ACCOUNT.blob.core.windows.net/rpm-repo/el9/x86_64/dnf-plugin-azure-auth-0.1.0-1.noarch.rpm" \
   -o /tmp/dnf-plugin-azure-auth.rpm
+
+# Install the plugin
 sudo dnf install -y /tmp/dnf-plugin-azure-auth.rpm
 
-# 4. Configure the plugin
+# ============================================================
+# STEP 4: Configure the plugin
+# ============================================================
+# Add your repository ID to the plugin configuration
+# This tells the plugin to add Azure AD tokens to requests for this repo
 sudo tee -a /etc/dnf/plugins/azure_auth.conf << 'EOF'
 [azure-rpm-repo]
 EOF
 
-# 5. Create repo file
+# Verify plugin configuration
+cat /etc/dnf/plugins/azure_auth.conf
+
+# ============================================================
+# STEP 5: Create repository configuration
+# ============================================================
+# Create the repo file - replace YOUR_STORAGE_ACCOUNT with actual value
 sudo tee /etc/yum.repos.d/azure-rpm.repo << 'EOF'
 [azure-rpm-repo]
 name=Azure Blob RPM Repository
@@ -342,31 +578,99 @@ enabled=1
 gpgcheck=0
 EOF
 
-# 6. Test
+# ============================================================
+# STEP 6: Test the repository
+# ============================================================
+# Refresh repository cache - plugin automatically adds Azure AD token
 sudo dnf makecache
+
+# List available packages from Azure repo
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available
+
+# Install a package
 sudo dnf install -y hello-azure
+
+# Verify the installation
 hello-azure --info
 ```
 
 ### For Azure VMs with Managed Identity
 
+Azure VMs with Managed Identity can authenticate without storing credentials:
+
 ```bash
-# 1. Assign Storage Blob Data Reader role to VM's Managed Identity
+# ============================================================
+# Prerequisites: VM must have System-assigned Managed Identity enabled
+# ============================================================
+
+# Check if Managed Identity is enabled on the VM
+az vm show -g YOUR_RG -n YOUR_VM --query identity
+
+# If not enabled, enable it:
+az vm identity assign -g YOUR_RG -n YOUR_VM
+
+# ============================================================
+# STEP 1: Assign Storage Blob Data Reader role to VM's Managed Identity
+# ============================================================
+# Get the VM's Managed Identity principal ID
 VM_PRINCIPAL_ID=$(az vm show -g YOUR_RG -n YOUR_VM --query identity.principalId -o tsv)
+
+# Get the storage account resource ID
 STORAGE_ACCOUNT_ID=$(az storage account show -n YOUR_STORAGE_ACCOUNT -g YOUR_RG --query id -o tsv)
 
+# Assign the Storage Blob Data Reader role
+# This allows the VM to read blobs using its Managed Identity
 az role assignment create \
   --role "Storage Blob Data Reader" \
   --assignee-object-id $VM_PRINCIPAL_ID \
   --assignee-principal-type ServicePrincipal \
   --scope $STORAGE_ACCOUNT_ID
 
-# 2. On the VM, login with Managed Identity
+# Verify the role assignment
+az role assignment list --scope $STORAGE_ACCOUNT_ID --output table
+
+# ============================================================
+# STEP 2: On the VM - Login with Managed Identity
+# ============================================================
+# SSH into the VM
+ssh azureuser@<VM_IP_ADDRESS>
+
+# Login using Managed Identity (no credentials needed!)
 az login --identity
 
-# 3. Configure plugin and repo as above
-# 4. dnf commands will automatically use Managed Identity tokens
+# Verify - should show the subscription
+az account show
+
+# ============================================================
+# STEP 3: Configure plugin and repo (same as above)
+# ============================================================
+# The plugin will automatically use 'az account get-access-token'
+# which works with Managed Identity
+
+# Configure plugin
+sudo tee -a /etc/dnf/plugins/azure_auth.conf << 'EOF'
+[azure-rpm-repo]
+EOF
+
+# Create repo file
+sudo tee /etc/yum.repos.d/azure-rpm.repo << 'EOF'
+[azure-rpm-repo]
+name=Azure Blob RPM Repository
+baseurl=https://YOUR_STORAGE_ACCOUNT.blob.core.windows.net/rpm-repo/el9/x86_64
+enabled=1
+gpgcheck=0
+EOF
+
+# ============================================================
+# STEP 4: Test - tokens are fetched automatically via Managed Identity
+# ============================================================
+sudo dnf makecache
+sudo dnf install -y hello-azure
+hello-azure --info
 ```
+
+> **Security Best Practice**: Managed Identity eliminates the need to store credentials
+> on the VM. The Azure platform automatically manages the identity lifecycle.
 
 ---
 
