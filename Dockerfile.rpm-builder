@@ -1,0 +1,155 @@
+# ==============================================================================
+# Dockerfile for RPM Package Builder (RHEL-compatible)
+# ==============================================================================
+# This Dockerfile creates an environment for building RPM packages
+# and managing RPM repositories with Azure Blob Storage integration.
+# Uses Rocky Linux 8 for RHEL 8 compatibility.
+# ==============================================================================
+
+FROM rockylinux:8
+
+LABEL maintainer="RPM POC Project"
+LABEL description="RPM Package Builder for Azure Blob Storage Repository Testing (RHEL 8 Compatible)"
+
+# Enable PowerTools/CRB repository for additional build dependencies
+RUN dnf install -y dnf-plugins-core epel-release && \
+    dnf config-manager --set-enabled powertools || \
+    dnf config-manager --set-enabled crb || true
+
+# Install required packages
+RUN dnf install -y \
+    # RPM build tools
+    rpm-build \
+    rpmdevtools \
+    rpmlint \
+    # Repository tools
+    createrepo_c \
+    # Utilities
+    curl \
+    wget \
+    git \
+    tree \
+    jq \
+    findutils \
+    # Python for scripting
+    python3 \
+    python3-pip \
+    && dnf clean all
+
+# Install Azure CLI
+RUN rpm --import https://packages.microsoft.com/keys/microsoft.asc && \
+    dnf install -y https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm && \
+    dnf install -y azure-cli || \
+    pip3 install azure-cli
+
+# Set up RPM build environment for root user
+RUN rpmdev-setuptree
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Create necessary directories
+RUN mkdir -p /workspace/packages \
+    /workspace/repo/Packages \
+    /workspace/specs \
+    /scripts
+
+# Copy helper scripts (will be mounted in compose)
+# These provide default functionality if not overridden
+
+# Create a default build script
+RUN cat > /scripts/build-rpm.sh << 'EOF'
+#!/bin/bash
+set -e
+
+SPEC_FILE=$1
+if [ -z "$SPEC_FILE" ]; then
+    echo "Usage: build-rpm.sh <spec-file>"
+    exit 1
+fi
+
+echo "Building RPM from: $SPEC_FILE"
+rpmbuild -bb "$SPEC_FILE"
+
+echo "Copying built RPMs to /workspace/repo/Packages/"
+find ~/rpmbuild/RPMS -name "*.rpm" -exec cp {} /workspace/repo/Packages/ \;
+
+echo "Build complete!"
+EOF
+RUN chmod +x /scripts/build-rpm.sh
+
+# Create repository update script
+RUN cat > /scripts/update-repo.sh << 'EOF'
+#!/bin/bash
+set -e
+
+REPO_PATH=${1:-/workspace/repo}
+
+echo "Updating repository metadata in: $REPO_PATH"
+createrepo_c --update "$REPO_PATH"
+
+echo "Repository metadata updated:"
+ls -la "$REPO_PATH/repodata/"
+EOF
+RUN chmod +x /scripts/update-repo.sh
+
+# Create Azure upload script
+RUN cat > /scripts/upload-to-azure.sh << 'EOF'
+#!/bin/bash
+set -e
+
+if [ -z "$STORAGE_ACCOUNT" ]; then
+    echo "ERROR: STORAGE_ACCOUNT environment variable not set"
+    exit 1
+fi
+
+CONTAINER=${CONTAINER_NAME:-yumrepo}
+REPO_PATH=${1:-/workspace/repo}
+
+echo "Uploading repository to Azure Blob Storage..."
+echo "  Storage Account: $STORAGE_ACCOUNT"
+echo "  Container: $CONTAINER"
+echo "  Source: $REPO_PATH"
+
+az storage blob upload-batch \
+    --account-name "$STORAGE_ACCOUNT" \
+    --destination "$CONTAINER" \
+    --source "$REPO_PATH" \
+    --auth-mode login \
+    --overwrite
+
+echo "Upload complete!"
+EOF
+RUN chmod +x /scripts/upload-to-azure.sh
+
+# Create a test RPM spec file
+RUN cat > /workspace/specs/test-package.spec << 'EOF'
+Name:           test-package
+Version:        1.0.0
+Release:        1%{?dist}
+Summary:        Test package for Azure Blob Storage RPM Repository
+
+License:        MIT
+URL:            https://example.com
+
+%description
+A test RPM package for validating Azure Blob Storage repository functionality.
+
+%install
+mkdir -p %{buildroot}%{_bindir}
+cat > %{buildroot}%{_bindir}/test-package << 'SCRIPT'
+#!/bin/bash
+echo "Test Package v1.0.0 - Successfully installed from Azure Blob Storage!"
+SCRIPT
+chmod +x %{buildroot}%{_bindir}/test-package
+
+%files
+%{_bindir}/test-package
+
+%changelog
+* %(date "+%a %b %d %Y") Test <test@example.com> - 1.0.0-1
+- Initial test package
+EOF
+
+# Set default command
+CMD ["/bin/bash"]

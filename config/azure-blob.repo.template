@@ -1,0 +1,56 @@
+# ==============================================================================
+# Azure Blob Storage RPM Repository Configuration
+# ==============================================================================
+# 
+# This repository uses Azure AD authentication via dnf-plugin-azure-auth.
+# No SAS tokens or public blob access required.
+#
+# Prerequisites:
+# 1. Install dnf-plugin-azure-auth RPM
+# 2. Install azure-cli package
+# 3. Login to Azure: az login (or az login --identity for Managed Identity)
+# 4. User/identity needs "Storage Blob Data Reader" role on the storage account
+#
+# Setup Steps:
+# 1. Copy this file to /etc/yum.repos.d/azure-blob.repo
+# 2. Replace ${AZURE_STORAGE_ACCOUNT} and ${AZURE_STORAGE_CONTAINER} with actual values
+# 3. Add the repo ID to /etc/dnf/plugins/azure_auth.conf:
+#    [azure-rpm-repo]
+# 4. Run: dnf makecache
+#
+# The plugin will automatically add Azure AD Bearer tokens to requests.
+# ==============================================================================
+
+[azure-rpm-repo-el8]
+name=Azure Blob Storage RPM Repository - EL8
+baseurl=https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/${AZURE_STORAGE_CONTAINER}/el8/x86_64
+enabled=1
+gpgcheck=0
+sslverify=1
+metadata_expire=3600
+skip_if_unavailable=1
+
+[azure-rpm-repo-el9]
+name=Azure Blob Storage RPM Repository - EL9
+baseurl=https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net/${AZURE_STORAGE_CONTAINER}/el9/x86_64
+enabled=1
+gpgcheck=0
+sslverify=1
+metadata_expire=3600
+skip_if_unavailable=1
+
+# ==============================================================================
+# Example with actual values:
+# ==============================================================================
+# [azure-rpm-repo]
+# name=Azure Blob Storage RPM Repository
+# baseurl=https://rpmrepopoc12345.blob.core.windows.net/rpm-repo/el9/x86_64
+# enabled=1
+# gpgcheck=0
+# sslverify=1
+#
+# And in /etc/dnf/plugins/azure_auth.conf:
+# [main]
+# enabled=1
+# 
+# [azure-rpm-repo]

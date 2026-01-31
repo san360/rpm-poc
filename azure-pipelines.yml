@@ -1,0 +1,323 @@
+# ==============================================================================
+# Azure DevOps Pipeline for RPM Repository Management
+# ==============================================================================
+# This pipeline builds RPM packages, manages repository metadata, and
+# publishes to Azure Blob Storage.
+# ==============================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - 'packages/**'
+      - 'specs/**'
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'packages/**'
+      - 'specs/**'
+
+# Pool selection - use Microsoft-hosted agent with Linux
+pool:
+  vmImage: 'ubuntu-latest'
+
+# ==============================================================================
+# Variables
+# ==============================================================================
+variables:
+  # Variable group containing secrets (create in Azure DevOps Library)
+  # Should contain: STORAGE_ACCOUNT_NAME
+  - group: rpm-repo-secrets
+  
+  # Pipeline variables
+  - name: containerName
+    value: 'yumrepo'
+  - name: repoPath
+    value: '$(Build.SourcesDirectory)/repo'
+  - name: packagesPath
+    value: '$(Build.SourcesDirectory)/packages'
+
+# ==============================================================================
+# Stages
+# ==============================================================================
+stages:
+  # ============================================================================
+  # Stage: Build
+  # ============================================================================
+  - stage: Build
+    displayName: 'Build RPM Packages'
+    jobs:
+      - job: BuildRPMs
+        displayName: 'Build RPM Packages'
+        
+        # Use Fedora container for RPM building
+        container:
+          image: fedora:39
+          options: --user root
+        
+        steps:
+          # Checkout code
+          - checkout: self
+            fetchDepth: 1
+          
+          # Install build dependencies
+          - script: |
+              dnf install -y \
+                rpm-build \
+                rpmdevtools \
+                createrepo_c \
+                rpmlint
+            displayName: 'Install RPM build tools'
+          
+          # Set up RPM build environment
+          - script: |
+              rpmdev-setuptree
+            displayName: 'Setup RPM build environment'
+          
+          # Build RPM packages from spec files
+          - script: |
+              set -e
+              
+              echo "Building RPM packages..."
+              
+              # Find all spec files and build them
+              SPECS_DIR="$(Build.SourcesDirectory)/specs"
+              
+              if [ -d "$SPECS_DIR" ]; then
+                for spec in $(find "$SPECS_DIR" -name "*.spec"); do
+                  echo "Building: $spec"
+                  
+                  # Lint the spec file first
+                  rpmlint "$spec" || true
+                  
+                  # Build the RPM
+                  rpmbuild -bb "$spec"
+                done
+              else
+                echo "No specs directory found. Creating test package..."
+                
+                # Create a test spec file
+                cat > ~/rpmbuild/SPECS/pipeline-test.spec << 'EOF'
+              Name:           pipeline-test
+              Version:        $(Build.BuildNumber)
+              Release:        1%{?dist}
+              Summary:        Pipeline test package
+              License:        MIT
+              %description
+              Test package built by Azure DevOps pipeline.
+              Build: $(Build.BuildNumber)
+              %install
+              mkdir -p %{buildroot}%{_bindir}
+              echo '#!/bin/bash' > %{buildroot}%{_bindir}/pipeline-test
+              echo 'echo "Pipeline Test Package - Build $(Build.BuildNumber)"' >> %{buildroot}%{_bindir}/pipeline-test
+              chmod +x %{buildroot}%{_bindir}/pipeline-test
+              %files
+              %{_bindir}/pipeline-test
+              EOF
+                
+                rpmbuild -bb ~/rpmbuild/SPECS/pipeline-test.spec
+              fi
+              
+              echo "Build complete!"
+            displayName: 'Build RPM packages'
+          
+          # Collect built RPMs
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/rpms
+              find ~/rpmbuild/RPMS -name "*.rpm" -exec cp {} $(Build.ArtifactStagingDirectory)/rpms/ \;
+              
+              echo "Built RPMs:"
+              ls -la $(Build.ArtifactStagingDirectory)/rpms/
+            displayName: 'Collect built RPMs'
+          
+          # Publish RPM artifacts
+          - publish: $(Build.ArtifactStagingDirectory)/rpms
+            artifact: rpms
+            displayName: 'Publish RPM artifacts'
+
+  # ============================================================================
+  # Stage: CreateRepository
+  # ============================================================================
+  - stage: CreateRepository
+    displayName: 'Create Repository Metadata'
+    dependsOn: Build
+    jobs:
+      - job: CreateRepoMetadata
+        displayName: 'Generate Repository Metadata'
+        
+        container:
+          image: fedora:39
+          options: --user root
+        
+        steps:
+          # Download built RPMs
+          - download: current
+            artifact: rpms
+            displayName: 'Download RPM artifacts'
+          
+          # Install createrepo_c
+          - script: |
+              dnf install -y createrepo_c tree
+            displayName: 'Install createrepo_c'
+          
+          # Create repository structure
+          - script: |
+              set -e
+              
+              REPO_DIR=$(Build.ArtifactStagingDirectory)/repo
+              mkdir -p $REPO_DIR/Packages
+              
+              # Copy RPMs to repository structure
+              cp $(Pipeline.Workspace)/rpms/*.rpm $REPO_DIR/Packages/
+              
+              # Generate repository metadata
+              createrepo_c $REPO_DIR
+              
+              echo "Repository structure:"
+              tree $REPO_DIR
+            displayName: 'Create repository metadata'
+          
+          # Publish repository artifact
+          - publish: $(Build.ArtifactStagingDirectory)/repo
+            artifact: repo
+            displayName: 'Publish repository artifact'
+
+  # ============================================================================
+  # Stage: Publish (only on main branch)
+  # ============================================================================
+  - stage: Publish
+    displayName: 'Publish to Azure Blob Storage'
+    dependsOn: CreateRepository
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    
+    jobs:
+      - job: PublishToAzure
+        displayName: 'Upload Repository to Azure'
+        
+        steps:
+          # Download repository artifact
+          - download: current
+            artifact: repo
+            displayName: 'Download repository artifact'
+          
+          # Install Azure CLI
+          - task: AzureCLI@2
+            displayName: 'Upload to Azure Blob Storage'
+            inputs:
+              azureSubscription: 'your-azure-service-connection'  # Update this
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                set -e
+                
+                STORAGE_ACCOUNT="$(STORAGE_ACCOUNT_NAME)"
+                CONTAINER="$(containerName)"
+                REPO_SOURCE="$(Pipeline.Workspace)/repo"
+                
+                echo "Uploading repository to Azure Blob Storage..."
+                echo "  Storage Account: $STORAGE_ACCOUNT"
+                echo "  Container: $CONTAINER"
+                echo "  Source: $REPO_SOURCE"
+                
+                # Upload all repository files
+                az storage blob upload-batch \
+                  --account-name "$STORAGE_ACCOUNT" \
+                  --destination "$CONTAINER" \
+                  --source "$REPO_SOURCE" \
+                  --overwrite
+                
+                echo ""
+                echo "Upload complete!"
+                
+                # List uploaded files
+                echo ""
+                echo "Uploaded files:"
+                az storage blob list \
+                  --account-name "$STORAGE_ACCOUNT" \
+                  --container-name "$CONTAINER" \
+                  --output table
+
+  # ============================================================================
+  # Stage: Test
+  # ============================================================================
+  - stage: Test
+    displayName: 'Test Repository Access'
+    dependsOn: Publish
+    condition: succeeded()
+    
+    jobs:
+      - job: TestRepository
+        displayName: 'Verify Repository Access'
+        
+        container:
+          image: fedora:39
+          options: --user root
+        
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Test DNF Access to Repository'
+            inputs:
+              azureSubscription: 'your-azure-service-connection'  # Update this
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                set -e
+                
+                # Generate short-lived SAS token for testing
+                EXPIRY=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%MZ)
+                SAS=$(az storage container generate-sas \
+                  --account-name $(STORAGE_ACCOUNT_NAME) \
+                  --name $(containerName) \
+                  --permissions rl \
+                  --expiry $EXPIRY \
+                  --output tsv)
+                
+                REPO_URL="https://$(STORAGE_ACCOUNT_NAME).blob.core.windows.net/$(containerName)/?$SAS"
+                
+                # Create repo configuration
+                cat > /etc/yum.repos.d/azure-test.repo << EOF
+                [azure-test]
+                name=Azure Blob Storage Test Repository
+                baseurl=$REPO_URL
+                enabled=1
+                gpgcheck=0
+                sslverify=1
+                EOF
+                
+                # Test repository access
+                echo "Testing repository access..."
+                dnf clean all
+                
+                echo ""
+                echo "Repository list:"
+                dnf repolist
+                
+                echo ""
+                echo "Available packages:"
+                dnf --disablerepo="*" --enablerepo="azure-test" list available
+                
+                echo ""
+                echo "✓ Repository test passed!"
+
+# ==============================================================================
+# Notes for setup:
+# ==============================================================================
+# 1. Create a Variable Group named 'rpm-repo-secrets' in Azure DevOps Library
+#    - Add variable: STORAGE_ACCOUNT_NAME = your-storage-account
+#
+# 2. Create an Azure Service Connection named 'your-azure-service-connection'
+#    - Use appropriate permissions for blob storage access
+#
+# 3. Ensure the service principal has:
+#    - Storage Blob Data Contributor role on the storage account
+#
+# 4. Create a 'specs' directory in your repository with .spec files
+#    - Or the pipeline will create a test package
+# ==============================================================================

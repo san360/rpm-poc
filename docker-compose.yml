@@ -1,0 +1,215 @@
+# ==============================================================================
+# Docker Compose for RPM Repository Testing
+# ==============================================================================
+# This file sets up a complete test environment for validating
+# Azure Blob Storage as an RPM repository backend.
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # RPM Builder - Builds test packages and creates repository
+  # ===========================================================================
+  rpm-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.rpm-builder
+    container_name: rpm-builder
+    volumes:
+      - ./packages:/workspace/packages
+      - ./repo:/workspace/repo
+      - ./scripts:/scripts:ro
+      - ${HOME}/.azure:/root/.azure:ro  # Azure CLI credentials
+    environment:
+      - STORAGE_ACCOUNT=${STORAGE_ACCOUNT:-}
+      - CONTAINER_NAME=${CONTAINER_NAME:-yumrepo}
+      - AZURE_CONFIG_DIR=/root/.azure
+    working_dir: /workspace
+    command: /scripts/docker-build-and-upload.sh
+
+  # ===========================================================================
+  # Fedora Client - Test DNF access on Fedora
+  # ===========================================================================
+  fedora-client:
+    image: fedora:39
+    container_name: fedora-test-client
+    volumes:
+      - ./config:/config:ro
+      - ./scripts:/scripts:ro
+    environment:
+      - REPO_URL=${REPO_URL:-}
+    depends_on:
+      - rpm-builder
+    command: >
+      bash -c "
+        echo 'Setting up Fedora test client...'
+        
+        # Create repo configuration if REPO_URL is provided
+        if [ -n \"$$REPO_URL\" ]; then
+          cat > /etc/yum.repos.d/azure-test.repo << EOF
+      [azure-test]
+      name=Azure Blob Storage Test Repository
+      baseurl=$$REPO_URL
+      enabled=1
+      gpgcheck=0
+      sslverify=1
+      EOF
+          echo 'Repository configured.'
+        elif [ -f /config/azure-test.repo ]; then
+          cp /config/azure-test.repo /etc/yum.repos.d/
+          echo 'Repository configuration copied from mount.'
+        else
+          echo 'WARNING: No repository URL configured!'
+          echo 'Set REPO_URL environment variable or mount config/azure-test.repo'
+        fi
+        
+        # Test repository access
+        echo ''
+        echo '=== Testing Repository Access ==='
+        dnf clean all
+        dnf repolist
+        echo ''
+        echo '=== Available Packages from azure-test ==='
+        dnf --disablerepo='*' --enablerepo='azure-test' list available 2>/dev/null || echo 'No packages or repo not accessible'
+        echo ''
+        echo '=== Test Complete ==='
+      "
+
+  # ===========================================================================
+  # Rocky Linux Client - Test DNF access on Rocky Linux 9
+  # ===========================================================================
+  rocky-client:
+    image: rockylinux:9
+    container_name: rocky-test-client
+    volumes:
+      - ./config:/config:ro
+      - ./scripts:/scripts:ro
+    environment:
+      - REPO_URL=${REPO_URL:-}
+    depends_on:
+      - rpm-builder
+    command: >
+      bash -c "
+        echo 'Setting up Rocky Linux test client...'
+        
+        if [ -n \"$$REPO_URL\" ]; then
+          cat > /etc/yum.repos.d/azure-test.repo << EOF
+      [azure-test]
+      name=Azure Blob Storage Test Repository
+      baseurl=$$REPO_URL
+      enabled=1
+      gpgcheck=0
+      sslverify=1
+      EOF
+        elif [ -f /config/azure-test.repo ]; then
+          cp /config/azure-test.repo /etc/yum.repos.d/
+        fi
+        
+        dnf clean all
+        dnf repolist
+        dnf --disablerepo='*' --enablerepo='azure-test' list available 2>/dev/null || echo 'Repository test complete'
+      "
+
+  # ===========================================================================
+  # AlmaLinux Client - Test DNF access on AlmaLinux 9
+  # ===========================================================================
+  alma-client:
+    image: almalinux:9
+    container_name: alma-test-client
+    volumes:
+      - ./config:/config:ro
+    environment:
+      - REPO_URL=${REPO_URL:-}
+    depends_on:
+      - rpm-builder
+    command: >
+      bash -c "
+        echo 'Setting up AlmaLinux test client...'
+        
+        if [ -n \"$$REPO_URL\" ]; then
+          cat > /etc/yum.repos.d/azure-test.repo << EOF
+      [azure-test]
+      name=Azure Blob Storage Test Repository
+      baseurl=$$REPO_URL
+      enabled=1
+      gpgcheck=0
+      sslverify=1
+      EOF
+        elif [ -f /config/azure-test.repo ]; then
+          cp /config/azure-test.repo /etc/yum.repos.d/
+        fi
+        
+        dnf clean all
+        dnf repolist
+        dnf --disablerepo='*' --enablerepo='azure-test' list available 2>/dev/null || echo 'Repository test complete'
+      "
+
+  # ===========================================================================
+  # RHEL UBI Client - Test on Red Hat Universal Base Image
+  # ===========================================================================
+  rhel-ubi-client:
+    image: registry.access.redhat.com/ubi9/ubi:latest
+    container_name: rhel-ubi-test-client
+    volumes:
+      - ./config:/config:ro
+    environment:
+      - REPO_URL=${REPO_URL:-}
+    depends_on:
+      - rpm-builder
+    command: >
+      bash -c "
+        echo 'Setting up RHEL UBI test client...'
+        
+        if [ -n \"$$REPO_URL\" ]; then
+          cat > /etc/yum.repos.d/azure-test.repo << EOF
+      [azure-test]
+      name=Azure Blob Storage Test Repository
+      baseurl=$$REPO_URL
+      enabled=1
+      gpgcheck=0
+      sslverify=1
+      EOF
+        elif [ -f /config/azure-test.repo ]; then
+          cp /config/azure-test.repo /etc/yum.repos.d/
+        fi
+        
+        dnf clean all
+        dnf repolist
+        dnf --disablerepo='*' --enablerepo='azure-test' list available 2>/dev/null || echo 'Repository test complete'
+      "
+
+  # ===========================================================================
+  # Interactive Shell - For manual testing
+  # ===========================================================================
+  shell:
+    image: fedora:39
+    container_name: rpm-test-shell
+    volumes:
+      - ./packages:/workspace/packages
+      - ./repo:/workspace/repo
+      - ./config:/config
+      - ./scripts:/scripts
+      - ${HOME}/.azure:/root/.azure:ro
+    environment:
+      - STORAGE_ACCOUNT=${STORAGE_ACCOUNT:-}
+      - CONTAINER_NAME=${CONTAINER_NAME:-yumrepo}
+      - REPO_URL=${REPO_URL:-}
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+# ===========================================================================
+# Volumes for persistent data
+# ===========================================================================
+volumes:
+  rpm-packages:
+  repo-data:
+
+# ===========================================================================
+# Networks
+# ===========================================================================
+networks:
+  default:
+    name: rpm-test-network

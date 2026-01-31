@@ -1,0 +1,41 @@
+# RPM POC Files
+*.rpm
+repo/
+!repo/.gitkeep
+packages/*.rpm
+packages/repodata/
+
+# Environment files with secrets
+.env
+.env.local
+.env.generated
+poc-config.env
+
+# Azure credentials
+.azure/
+
+# Build artifacts
+rpmbuild/
+*.tar.gz
+.tmp-sync/
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
