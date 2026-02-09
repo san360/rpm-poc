@@ -13,14 +13,16 @@ graph LR
     P3["Phase 3<br/>Upload to Azure"]
     P4["Phase 4<br/>Test Repository"]
     P5["Phase 5<br/>End-to-End Test"]
+    P6["Phase 6<br/>VM MI Test"]
 
-    P1 --> P2 --> P3 --> P4 --> P5
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6
 
     style P1 fill:#0078D4,color:#fff
     style P2 fill:#F25022,color:#fff
     style P3 fill:#7FBA00,color:#fff
     style P4 fill:#FFB900,color:#000
     style P5 fill:#737373,color:#fff
+    style P6 fill:#107C10,color:#fff
 ```
 
 ---
@@ -62,6 +64,11 @@ docker run --rm -it \
 
 # === PHASE 5: END-TO-END ===
 ./scripts/e2e-test.sh -g rg-rpm-poc                        # Full pipeline test
+
+# === PHASE 6: VM MANAGED IDENTITY TEST ===
+sudo apt-get install -y sshpass                             # Required for SSH automation
+./scripts/deploy-test-vm.sh                                 # Deploy RHEL 9 VM with MI
+./scripts/test-vm-managed-identity.sh                       # Test managed identity workflow
 
 # === CLEANUP ===
 az group delete --name rg-rpm-poc --yes --no-wait          # Delete all resources
@@ -631,6 +638,133 @@ Run the complete pipeline with a single command:
 
 ---
 
+## Phase 6: Azure VM Testing with Managed Identity
+
+### Architecture
+
+```mermaid
+graph TB
+    subgraph "Deployment (deploy-test-vm.sh)"
+        Deploy["deploy-test-vm.sh"]
+        Deploy --> Tag["Tag RG:<br/>SecurityControle=Ignore"]
+        Deploy --> VM["RHEL 9 VM<br/>(Standard_B2s)"]
+        VM --> MI["System-Assigned<br/>Managed Identity"]
+        MI --> RBAC["Storage Blob Data Reader<br/>→ Storage Account"]
+        Deploy --> Creds[".env.vm-credentials"]
+    end
+
+    subgraph "Testing (test-vm-managed-identity.sh)"
+        Test["test-vm-managed-identity.sh"]
+        Test --> SCP["SCP plugin RPM → VM"]
+        SCP --> AzCLI3["Install Azure CLI"]
+        AzCLI3 --> LoginMI["az login --identity"]
+        LoginMI --> InstallPlugin["Install plugin + configure"]
+        InstallPlugin --> DNFTest["dnf makecache<br/>dnf install hello-azure"]
+    end
+
+    RBAC -. "Managed Identity<br/>Token" .-> DNFTest
+
+    style Deploy fill:#0078D4,color:#fff
+    style VM fill:#F25022,color:#fff
+    style MI fill:#7FBA00,color:#fff
+    style Test fill:#FFB900,color:#000
+    style DNFTest fill:#107C10,color:#fff
+```
+
+### Step 6.1: Install sshpass (Required Once)
+
+```bash
+# sshpass is needed for automated SSH password authentication
+sudo apt-get install -y sshpass
+```
+
+### Step 6.2: Deploy RHEL 9 Test VM
+
+```bash
+# Deploy VM with managed identity (reads config from .env.generated)
+./scripts/deploy-test-vm.sh
+
+# Or with explicit parameters
+./scripts/deploy-test-vm.sh \
+  --resource-group rg-rpm-poc \
+  --storage-account $AZURE_STORAGE_ACCOUNT \
+  --vm-name rpm-test-vm \
+  --vm-size Standard_B2s
+```
+
+**What this script does:**
+- Tags the resource group with `SecurityControle=Ignore`
+- Generates a secure admin password
+- Accepts RHEL marketplace image terms
+- Creates a RHEL 9 VM with system-assigned managed identity
+- Assigns **Storage Blob Data Reader** role to the VM's identity
+- Waits for RBAC propagation (30 seconds)
+- Saves credentials to `.env.vm-credentials`
+
+### Step 6.3: Run Managed Identity Test
+
+```bash
+# Test the full managed identity workflow (reads config from .env files)
+./scripts/test-vm-managed-identity.sh
+
+# Or with explicit parameters
+./scripts/test-vm-managed-identity.sh \
+  --vm-ip <VM_PUBLIC_IP> \
+  --vm-user azureuser \
+  --vm-password '<password>' \
+  --storage-account $AZURE_STORAGE_ACCOUNT
+```
+
+**Test steps executed on the VM:**
+1. Install Azure CLI
+2. Login with managed identity (`az login --identity`)
+3. Upload plugin RPM via SCP (bootstrapping)
+4. Install `dnf-plugin-azure-auth`
+5. Configure plugin and repository
+6. `dnf makecache` (tests managed identity token injection)
+7. List packages from Azure Blob repo
+8. Install `hello-azure`
+9. Verify token source is managed identity
+
+**Expected Output:**
+```
+=======================================================
+Azure VM Managed Identity Test (RHEL 9)
+=======================================================
+
+Step 1/10: Install Azure CLI on VM
+  ✓ PASS: Azure CLI installed
+
+Step 2/10: Login with Managed Identity
+  ✓ PASS: Managed Identity login
+
+Step 3/10: Upload plugin RPM to VM
+  ✓ PASS: Plugin RPM uploaded to VM
+
+...
+
+=======================================================
+ Managed Identity Test Results
+=======================================================
+
+  Tests passed:  11
+  Tests failed:  0
+
+  All tests passed!
+```
+
+### Step 6.4: Clean Up VM
+
+```bash
+# Delete just the VM (keeps storage account and other resources)
+az vm delete --name rpm-test-vm --resource-group rg-rpm-poc --yes
+
+# Or delete entire resource group (removes everything)
+az group delete --name rg-rpm-poc --yes --no-wait
+```
+
+---
+
 ## Client Configuration Guide
 
 ### Client Setup Flow
@@ -945,6 +1079,8 @@ az group delete --name rg-rpm-poc --yes --no-wait
 | `scripts/upload-to-azure.sh` | Uploads to Azure Blob (Azure AD) |
 | `scripts/test-repository.sh` | Tests repository access |
 | `scripts/e2e-test.sh` | Full pipeline test |
+| `scripts/deploy-test-vm.sh` | Deploys RHEL 9 test VM with managed identity |
+| `scripts/test-vm-managed-identity.sh` | Tests managed identity RPM repo access |
 | `specs/hello-azure.spec` | Sample RPM spec file |
 | `specs/dnf-plugin-azure-auth.spec` | Azure AD auth plugin spec |
 | `sources/azure_auth.py` | DNF plugin Python source |
@@ -955,8 +1091,9 @@ az group delete --name rg-rpm-poc --yes --no-wait
 
 ## Next Steps
 
-1. **Add GPG Signing**: Sign packages for production use
-2. **Multiple Architectures**: Add support for aarch64
-3. **Azure DevOps Pipeline**: See [azure-pipelines.yml](azure-pipelines.yml)
-4. **Private Endpoints**: For VNet-restricted access
-5. **Monitoring**: Add Azure Monitor alerts for access issues
+1. **VM Testing**: Deploy and test with managed identity (Phase 6 above)
+2. **Add GPG Signing**: Sign packages for production use
+3. **Multiple Architectures**: Add support for aarch64
+4. **Azure DevOps Pipeline**: See [azure-pipelines.yml](azure-pipelines.yml)
+5. **Private Endpoints**: For VNet-restricted access
+6. **Monitoring**: Add Azure Monitor alerts for access issues

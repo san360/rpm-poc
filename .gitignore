@@ -9,6 +9,7 @@ packages/repodata/
 .env
 .env.local
 .env.generated
+.env.vm-credentials
 poc-config.env
 
 # Azure credentials
