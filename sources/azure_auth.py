@@ -1,4 +1,5 @@
-# Copyright (C) Microsoft Corporation.
+# Based on dnf-plugin-azure-auth by Metaswitch
+# Original source: https://github.com/Metaswitch/dnf-plugin-azure-auth
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by

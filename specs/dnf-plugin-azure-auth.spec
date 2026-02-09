@@ -1,4 +1,5 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
+# Based on dnf-plugin-azure-auth by Metaswitch
+# Original source: https://github.com/Metaswitch/dnf-plugin-azure-auth
 # Licensed under the GPLv2 License.
 
 Summary:        DNF plugin for accessing repos in Azure Blob Storage via Azure AD
@@ -6,7 +7,6 @@ Name:           dnf-plugin-azure-auth
 Version:        0.1.0
 Release:        1%{?dist}
 License:        GPLv2
-Vendor:         Microsoft Corporation
 Group:          Applications/Tools
 URL:            https://github.com/Metaswitch/dnf-plugin-azure-auth
 Source0:        azure_auth.py

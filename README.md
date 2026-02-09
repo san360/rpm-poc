@@ -1405,4 +1405,6 @@ sudo dnf makecache -v                        # Verbose mode shows token info
 
 ## License
 
-This POC is provided for educational and testing purposes.
+The `dnf-plugin-azure-auth` component is based on [Metaswitch/dnf-plugin-azure-auth](https://github.com/Metaswitch/dnf-plugin-azure-auth) and is licensed under the **GNU General Public License v2.0 (GPL-2.0)**. See the [GPL-2.0 license text](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html) for details.
+
+All other code in this POC (scripts, specs for test packages, Dockerfiles, configuration) is provided for educational and testing purposes.
