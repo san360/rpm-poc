@@ -48,6 +48,11 @@ source .env.generated                                      # Load environment va
 ./scripts/build-rpm-local.sh all                           # Build all RPM packages
 ls packages/*.rpm                                          # Verify built packages
 
+# === BONUS: RANDOM PACKAGES ===
+./scripts/generate-random-rpms.sh -n 5                     # Generate 5 random packages
+./scripts/generate-random-rpms.sh --all -n 5               # Generate, build, and upload
+./scripts/generate-random-rpms.sh --cleanup                # Remove generated packages
+
 # === PHASE 3: UPLOAD ===
 ./scripts/upload-to-azure.sh                               # Upload packages to Azure Blob
 
@@ -69,6 +74,13 @@ docker run --rm -it \
 sudo apt-get install -y sshpass                             # Required for SSH automation
 ./scripts/deploy-test-vm.sh                                 # Deploy RHEL 9 VM with MI
 ./scripts/test-vm-managed-identity.sh                       # Test managed identity workflow
+
+# === USEFUL DNF COMMANDS (on VM or in Docker) ===
+sudo dnf clean metadata && sudo dnf makecache                                      # Refresh metadata
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available            # List available packages
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list installed            # List installed packages
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" info <package-name>       # Package details
+sudo dnf makecache -v                                                              # Verbose (shows Azure AD token info)
 
 # === CLEANUP ===
 az group delete --name rg-rpm-poc --yes --no-wait          # Delete all resources
@@ -306,6 +318,80 @@ rpm -qpR packages/dnf-plugin-azure-auth-0.1.0-1.noarch.rpm # List requirements
 # Verify repository metadata was created
 ls packages/repodata/
 # Expected: repomd.xml, primary.xml.gz, filelists.xml.gz, other.xml.gz, etc.
+```
+
+---
+
+## Bonus: Generate Random Test Packages
+
+Quickly generate randomly-named RPM packages with fun animal/color combinations for testing.
+
+### Random Package Pipeline
+
+```mermaid
+graph LR
+    Gen["generate-random-rpms.sh<br/>-n 5"]
+    Build["build-rpm-local.sh<br/>all"]
+    Upload["upload-to-azure.sh"]
+    Test["dnf install<br/>random-cobalt-swift-falcon"]
+
+    Gen --> Build --> Upload --> Test
+
+    style Gen fill:#F25022,color:#fff
+    style Build fill:#FFB900,color:#000
+    style Upload fill:#7FBA00,color:#fff
+    style Test fill:#0078D4,color:#fff
+```
+
+### Quick One-Liner
+
+```bash
+# Generate 5 random packages, build, create repo metadata, and upload to Azure
+./scripts/generate-random-rpms.sh --all -n 5
+```
+
+### Step by Step
+
+```bash
+# Step 1: Generate random spec files
+./scripts/generate-random-rpms.sh -n 5
+ls specs/random-*.spec                    # View generated specs
+
+# Step 2: Build all packages (including random ones)
+./scripts/build-rpm-local.sh all
+ls packages/random-*.rpm                  # View built RPMs
+
+# Step 3: Upload to Azure
+./scripts/upload-to-azure.sh
+
+# Step 4: Test in Docker
+TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+docker run --rm -it \
+  -e DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN" \
+  -e AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT" \
+  rpm-repo-test:rocky9 bash -c '
+    setup-azure-repo.sh
+    dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available
+    dnf install -y random-*    # Install all random packages
+  '
+
+# Step 5: Or test on VM (if deployed)
+ssh azureuser@<VM_IP>
+sudo dnf makecache
+sudo dnf list available | grep random
+sudo dnf install -y random-cobalt-swift-falcon  # Example package name
+random-cobalt-swift-falcon --info               # Show package details
+```
+
+### Cleanup
+
+```bash
+# Remove all generated random specs and RPMs
+./scripts/generate-random-rpms.sh --cleanup
+
+# Rebuild repository with only standard packages
+./scripts/build-rpm-local.sh all
+./scripts/upload-to-azure.sh
 ```
 
 ---
@@ -613,6 +699,44 @@ EOF
 > **Note**: This method requires a pre-generated token since Azure CLI is not installed.
 > The plugin detects `DNF_PLUGIN_AZURE_AUTH_TOKEN` and uses it for authentication.
 
+### Step 4.4: Useful DNF Commands for Azure Repo
+
+Once the repository is configured (on a VM or in Docker), use these commands to manage packages:
+
+```bash
+# === REFRESH METADATA ===
+# Force clear cached metadata and re-fetch from Azure Blob Storage
+sudo dnf clean metadata && sudo dnf makecache
+
+# === LIST PACKAGES ===
+# List only packages available from the Azure repo (not yet installed)
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list available
+
+# List packages installed from the Azure repo
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list installed
+
+# List all packages (available + installed) from the Azure repo
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" list all
+
+# === PACKAGE DETAILS ===
+# Show detailed info about a specific package
+sudo dnf --disablerepo="*" --enablerepo="azure-rpm-repo" info <package-name>
+
+# === INSTALL / UPDATE ===
+# Install a package from the Azure repo
+sudo dnf install -y <package-name>
+
+# Install all random test packages at once
+sudo dnf install -y random-*
+
+# === VERBOSE MODE (Plugin Debugging) ===
+# Run with -v to see Azure AD auth plugin details (token, JWT claims, identity type)
+sudo dnf makecache -v
+```
+
+> **Note**: Once a package is installed, DNF tracks it under the `@System` repository.
+> The `From repo` field in `dnf info <package>` shows the original source repo.
+
 ---
 
 ## Phase 5: End-to-End Test
@@ -647,7 +771,7 @@ graph TB
     subgraph "Deployment (deploy-test-vm.sh)"
         Deploy["deploy-test-vm.sh"]
         Deploy --> Tag["Tag RG:<br/>SecurityControle=Ignore"]
-        Deploy --> VM["RHEL 9 VM<br/>(Standard_B2s)"]
+        Deploy --> VM["RHEL 9 VM<br/>(Standard_DS2_v2)"]
         VM --> MI["System-Assigned<br/>Managed Identity"]
         MI --> RBAC["Storage Blob Data Reader<br/>→ Storage Account"]
         Deploy --> Creds[".env.vm-credentials"]
@@ -689,7 +813,7 @@ sudo apt-get install -y sshpass
   --resource-group rg-rpm-poc \
   --storage-account $AZURE_STORAGE_ACCOUNT \
   --vm-name rpm-test-vm \
-  --vm-size Standard_B2s
+  --vm-size Standard_DS2_v2
 ```
 
 **What this script does:**
@@ -1059,6 +1183,27 @@ createrepo_c packages/
 ./scripts/upload-to-azure.sh
 ```
 
+### Error: "Cannot rename .repodata/ -> repodata/" (WSL)
+
+When running `createrepo_c` on WSL's `/mnt/c/` filesystem, the atomic directory rename fails because Windows-mounted paths don't support this operation.
+
+```bash
+# Workaround: Use a native Linux temp directory for createrepo_c,
+# then copy the result back to the project directory
+rm -rf packages/repodata
+mkdir -p /tmp/rpm-repo-build
+cp packages/*.rpm /tmp/rpm-repo-build/
+createrepo_c /tmp/rpm-repo-build/
+cp -r /tmp/rpm-repo-build/repodata packages/
+rm -rf /tmp/rpm-repo-build
+
+# Then upload to Azure
+./scripts/upload-to-azure.sh
+```
+
+> **Note**: This only affects WSL users building on `/mnt/c/`. Native Linux and Docker
+> builds are not affected. The `build-rpm-local.sh repo` command may also hit this issue.
+
 ---
 
 ## Clean Up
@@ -1081,6 +1226,7 @@ az group delete --name rg-rpm-poc --yes --no-wait
 | `scripts/e2e-test.sh` | Full pipeline test |
 | `scripts/deploy-test-vm.sh` | Deploys RHEL 9 test VM with managed identity |
 | `scripts/test-vm-managed-identity.sh` | Tests managed identity RPM repo access |
+| `scripts/generate-random-rpms.sh` | Generates random RPM packages for testing |
 | `specs/hello-azure.spec` | Sample RPM spec file |
 | `specs/dnf-plugin-azure-auth.spec` | Azure AD auth plugin spec |
 | `sources/azure_auth.py` | DNF plugin Python source |

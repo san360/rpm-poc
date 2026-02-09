@@ -19,9 +19,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # Default values (can be overridden via environment variables or parameters)
 RESOURCE_GROUP="${RESOURCE_GROUP:-}"
 AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT:-}"
-LOCATION="${LOCATION:-eastus}"
+LOCATION="${LOCATION:-swedencentral}"
 VM_NAME="${VM_NAME:-rpm-test-vm}"
-VM_SIZE="${VM_SIZE:-Standard_B2s}"
+VM_SIZE="${VM_SIZE:-Standard_DS2_v2}"
 ADMIN_USERNAME="${ADMIN_USERNAME:-azureuser}"
 ADMIN_PASSWORD=""
 VM_IMAGE="RedHat:RHEL:9-lvm-gen2:latest"
@@ -49,8 +49,8 @@ Required Parameters:
 
 Optional Parameters:
   --vm-name, -n             VM name (default: rpm-test-vm)
-  --vm-size                 VM size (default: Standard_B2s)
-  --location, -l            Azure region (default: eastus)
+  --vm-size                 VM size (default: Standard_DS2_v2)
+  --location, -l            Azure region (default: swedencentral)
   --admin-username, -u      Admin username (default: azureuser)
   --help, -h                Show this help message
 
@@ -107,7 +107,7 @@ load_env() {
             AZURE_STORAGE_ACCOUNT="${AZURE_STORAGE_ACCOUNT}"
         fi
         RESOURCE_GROUP="${RESOURCE_GROUP:-}"
-        LOCATION="${LOCATION:-eastus}"
+        LOCATION="${LOCATION:-swedencentral}"
     else
         log_warning "No .env.generated found. Provide parameters via CLI flags."
     fi
@@ -270,6 +270,7 @@ create_vm() {
     az vm create \
         --resource-group "$RESOURCE_GROUP" \
         --name "$VM_NAME" \
+        --location "$LOCATION" \
         --image "$VM_IMAGE" \
         --size "$VM_SIZE" \
         --admin-username "$ADMIN_USERNAME" \

@@ -2,8 +2,7 @@
 *.rpm
 repo/
 !repo/.gitkeep
-packages/*.rpm
-packages/repodata/
+packages/
 
 # Environment files with secrets
 .env
