@@ -269,18 +269,34 @@ stages:
               scriptLocation: 'inlineScript'
               inlineScript: |
                 set -e
-                
-                # Generate short-lived SAS token for testing
-                EXPIRY=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%MZ)
-                SAS=$(az storage container generate-sas \
-                  --account-name $(STORAGE_ACCOUNT_NAME) \
-                  --name $(containerName) \
-                  --permissions rl \
-                  --expiry $EXPIRY \
-                  --output tsv)
-                
-                REPO_URL="https://$(STORAGE_ACCOUNT_NAME).blob.core.windows.net/$(containerName)/?$SAS"
-                
+
+                # Get Azure AD token for Azure Blob Storage
+                TOKEN=$(az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv)
+
+                REPO_URL="https://$(STORAGE_ACCOUNT_NAME).blob.core.windows.net/$(containerName)"
+
+                # Verify blob access with Azure AD token
+                echo "Verifying Azure AD access to repository..."
+                HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "x-ms-version: 2022-11-02" \
+                  "$REPO_URL/repodata/repomd.xml")
+
+                if [ "$HTTP_STATUS" != "200" ]; then
+                  echo "ERROR: Failed to access repository (HTTP $HTTP_STATUS)"
+                  echo "Ensure the service principal has Storage Blob Data Reader role"
+                  exit 1
+                fi
+                echo "✓ Azure AD access verified (HTTP $HTTP_STATUS)"
+
+                # Install the dnf-plugin-azure-auth plugin
+                PLUGIN_URL="$REPO_URL/Packages"
+                PLUGIN_RPM=$(curl -s -H "Authorization: Bearer $TOKEN" -H "x-ms-version: 2022-11-02" \
+                  "$REPO_URL/repodata/primary.xml.gz" | gunzip | grep -o 'dnf-plugin-azure-auth[^<"]*\.rpm' | head -1)
+
+                # Set token for the plugin to use
+                export DNF_PLUGIN_AZURE_AUTH_TOKEN="$TOKEN"
+
                 # Create repo configuration
                 cat > /etc/yum.repos.d/azure-test.repo << EOF
                 [azure-test]
@@ -290,19 +306,19 @@ stages:
                 gpgcheck=0
                 sslverify=1
                 EOF
-                
+
                 # Test repository access
                 echo "Testing repository access..."
                 dnf clean all
-                
+
                 echo ""
                 echo "Repository list:"
                 dnf repolist
-                
+
                 echo ""
                 echo "Available packages:"
                 dnf --disablerepo="*" --enablerepo="azure-test" list available
-                
+
                 echo ""
                 echo "✓ Repository test passed!"
 

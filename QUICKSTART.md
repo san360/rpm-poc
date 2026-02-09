@@ -596,6 +596,8 @@ EOF
 
     # Test: refresh metadata and install package
     dnf makecache
+    dnf repolist
+    dnf list --repo azure-rpm-repo
     dnf install -y hello-azure
     hello-azure --info
 '

@@ -118,8 +118,8 @@ as a YUM/DNF repository. The setup typically involves:
 1. Creating an Azure Storage Account
 2. Creating a Blob Container
 3. Uploading RPM packages and repository metadata
-4. Generating a SAS token for access
-5. Configuring the client with a .repo file
+4. Configuring Azure AD RBAC roles (Storage Blob Data Reader)
+5. Installing dnf-plugin-azure-auth on clients for automatic token injection
 
 For more information, see the implementation guide in the POC repository.
 README
