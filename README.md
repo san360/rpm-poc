@@ -36,6 +36,44 @@ rpm-poc/
     └── dnf-plugin-azure-auth.spec      # Azure AD auth plugin spec
 ```
 
+## Solution Architecture
+
+```mermaid
+graph TB
+    subgraph "Azure Cloud"
+        AAD["Microsoft Entra ID<br/>(Azure AD)"]
+        subgraph "Azure Storage Account"
+            BC["Blob Container<br/>(rpm-repo)"]
+            BC --> RPMs["el9/x86_64/*.rpm"]
+            BC --> Repo["el9/x86_64/repodata/"]
+        end
+    end
+
+    subgraph "CI/CD Pipeline"
+        Build["Build RPMs<br/>(rpmbuild + createrepo_c)"]
+        Upload["Upload to Blob<br/>(az storage blob upload)"]
+        Build --> Upload
+    end
+
+    subgraph "Client Systems (RHEL/Rocky/Alma)"
+        DNF["dnf install package"]
+        Plugin["dnf-plugin-azure-auth"]
+        AZ["az cli / Managed Identity"]
+    end
+
+    Upload -- "Storage Blob Data<br/>Contributor" --> BC
+    DNF --> Plugin
+    Plugin --> AZ
+    AZ -- "1. Get Token" --> AAD
+    AAD -- "2. JWT Token" --> AZ
+    Plugin -- "3. HTTP + Bearer Token<br/>(Storage Blob Data Reader)" --> BC
+
+    style AAD fill:#0078D4,color:#fff
+    style BC fill:#0078D4,color:#fff
+    style Plugin fill:#107C10,color:#fff
+    style Build fill:#F25022,color:#fff
+```
+
 ## Quick Start
 
 ### Prerequisites
@@ -110,6 +148,34 @@ sudo dnf install hello-azure
 This solution uses **Azure AD authentication exclusively**. No SAS tokens or storage keys are required.
 
 ### How It Works
+
+```mermaid
+sequenceDiagram
+    participant User as User / System
+    participant DNF as DNF Package Manager
+    participant Plugin as dnf-plugin-azure-auth
+    participant AzCLI as Azure CLI
+    participant AAD as Microsoft Entra ID
+    participant Blob as Azure Blob Storage
+
+    User->>DNF: dnf install hello-azure
+    DNF->>Plugin: Intercept repo request
+
+    alt DNF_PLUGIN_AZURE_AUTH_TOKEN set
+        Plugin->>Plugin: Use pre-generated token
+    else Azure CLI available
+        Plugin->>AzCLI: az account get-access-token
+        AzCLI->>AAD: Request OAuth 2.0 token
+        AAD-->>AzCLI: JWT access token
+        AzCLI-->>Plugin: Access token
+    end
+
+    Plugin->>Blob: HTTP GET + Authorization: Bearer <token>
+    Blob->>AAD: Validate token + check RBAC
+    AAD-->>Blob: Authorized (Storage Blob Data Reader)
+    Blob-->>DNF: RPM package content
+    DNF-->>User: Package installed
+```
 
 1. **dnf-plugin-azure-auth** intercepts repository requests to Azure Blob Storage URLs
 2. The plugin obtains an Azure AD token using `az account get-access-token`

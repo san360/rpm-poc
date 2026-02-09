@@ -4,6 +4,25 @@
 
 This guide walks you through the complete process of setting up and testing the Azure Blob Storage RPM repository with **Azure AD authentication**.
 
+### Pipeline Overview
+
+```mermaid
+graph LR
+    P1["Phase 1<br/>Infrastructure"]
+    P2["Phase 2<br/>Build RPMs"]
+    P3["Phase 3<br/>Upload to Azure"]
+    P4["Phase 4<br/>Test Repository"]
+    P5["Phase 5<br/>End-to-End Test"]
+
+    P1 --> P2 --> P3 --> P4 --> P5
+
+    style P1 fill:#0078D4,color:#fff
+    style P2 fill:#F25022,color:#fff
+    style P3 fill:#7FBA00,color:#fff
+    style P4 fill:#FFB900,color:#000
+    style P5 fill:#737373,color:#fff
+```
+
 ---
 
 ## Quick Command Reference
@@ -96,6 +115,28 @@ az account show --output table
 
 ## Phase 1: Infrastructure Deployment
 
+### What Gets Created
+
+```mermaid
+graph TB
+    Script["create-azure-storage.sh"]
+    Script --> RG["Resource Group<br/>(rg-rpm-poc)"]
+    RG --> SA["Storage Account<br/>(rpmrepopocXXXXX)"]
+    SA --> Container["Blob Container<br/>(rpm-repo)"]
+    Container --> EL9["el9/x86_64/"]
+    Container --> EL8["el8/x86_64/"]
+
+    Script --> RBAC["RBAC Role Assignment"]
+    RBAC --> Role["Storage Blob Data<br/>Contributor"]
+    Role --> User["Current Azure AD User"]
+
+    Script --> Env[".env.generated"]
+
+    style Script fill:#F25022,color:#fff
+    style SA fill:#0078D4,color:#fff
+    style RBAC fill:#7FBA00,color:#fff
+```
+
 ### Step 1.1: Create Azure Storage Account
 
 ```bash
@@ -165,6 +206,39 @@ cat .env.generated
 
 ## Phase 2: Build RPM Packages
 
+### Build Process
+
+```mermaid
+graph LR
+    subgraph "Input"
+        Specs["specs/*.spec"]
+        Sources["sources/*.py, *.conf"]
+    end
+
+    subgraph "Build (build-rpm-local.sh all)"
+        Install["install<br/>prerequisites"]
+        Setup["setup<br/>~/rpmbuild"]
+        BuildStep["build<br/>rpmbuild -bb"]
+        RepoStep["repo<br/>createrepo_c"]
+        Install --> Setup --> BuildStep --> RepoStep
+    end
+
+    subgraph "Output (packages/)"
+        HelloRPM["hello-azure<br/>1.0.0-1.noarch.rpm"]
+        PluginRPM["dnf-plugin-azure-auth<br/>0.1.0-1.noarch.rpm"]
+        RepoData["repodata/<br/>repomd.xml, primary.xml.gz"]
+    end
+
+    Specs --> BuildStep
+    Sources --> BuildStep
+    BuildStep --> HelloRPM
+    BuildStep --> PluginRPM
+    RepoStep --> RepoData
+
+    style BuildStep fill:#F25022,color:#fff
+    style RepoStep fill:#7FBA00,color:#fff
+```
+
 ### Step 2.1: Build All Packages
 
 ```bash
@@ -230,6 +304,32 @@ ls packages/repodata/
 ---
 
 ## Phase 3: Upload to Azure Blob Storage
+
+### Upload Flow
+
+```mermaid
+sequenceDiagram
+    participant Script as upload-to-azure.sh
+    participant AzCLI as Azure CLI
+    participant AAD as Microsoft Entra ID
+    participant Blob as Azure Blob Storage
+
+    Script->>AzCLI: Verify authentication
+    AzCLI->>AAD: Validate session
+    AAD-->>AzCLI: Authenticated
+
+    loop For each *.rpm file
+        Script->>AzCLI: az storage blob upload (--auth-mode login)
+        AzCLI->>AAD: Get Bearer token
+        AAD-->>AzCLI: JWT token
+        AzCLI->>Blob: PUT blob with Bearer token
+        Blob-->>AzCLI: 201 Created
+    end
+
+    Script->>AzCLI: Upload repodata/*
+    AzCLI->>Blob: PUT repomd.xml, primary.xml.gz, ...
+    Blob-->>Script: Repository updated
+```
 
 ### Step 3.1: Upload Packages
 
@@ -351,6 +451,30 @@ Failed: 0
 ### Step 4.2: Test with Docker (Using Pre-built Test Image)
 
 We provide a Docker image with Azure CLI pre-installed for more realistic testing.
+
+#### Testing Options
+
+```mermaid
+graph TB
+    Docker["Docker Testing"]
+
+    Docker --> A["Option A<br/>Interactive Login"]
+    Docker --> B["Option B<br/>Pre-generated Token"]
+    Docker --> C["Step 4.3<br/>Plain Rocky Linux"]
+
+    A --> A1["rpm-repo-test:rocky9<br/>(Azure CLI included)"]
+    A1 --> A2["az login<br/>(opens browser)"]
+
+    B --> B1["rpm-repo-test:rocky9<br/>(Azure CLI included)"]
+    B1 --> B2["DNF_PLUGIN_AZURE_AUTH_TOKEN<br/>(passed from host)"]
+
+    C --> C1["rockylinux:9<br/>(minimal image)"]
+    C1 --> C2["Mount local packages<br/>+ use pre-generated token"]
+
+    style A fill:#0078D4,color:#fff
+    style B fill:#7FBA00,color:#fff
+    style C fill:#FFB900,color:#000
+```
 
 #### Build the Test Image
 
@@ -507,6 +631,28 @@ Run the complete pipeline with a single command:
 
 ## Client Configuration Guide
 
+### Client Setup Flow
+
+```mermaid
+graph TB
+    Start["Client VM<br/>(RHEL/Rocky/AlmaLinux)"]
+
+    Start --> Step1["1. Install Azure CLI"]
+    Step1 --> Step2["2. Authenticate"]
+    Step2 --> Auth1["az login<br/>(interactive)"]
+    Step2 --> Auth2["az login --identity<br/>(Managed Identity)"]
+    Auth1 --> Step3
+    Auth2 --> Step3
+    Step3["3. Install dnf-plugin-azure-auth"]
+    Step3 --> Step4["4. Configure plugin<br/>/etc/dnf/plugins/azure_auth.conf"]
+    Step4 --> Step5["5. Create repo file<br/>/etc/yum.repos.d/azure-rpm.repo"]
+    Step5 --> Step6["6. dnf makecache && dnf install"]
+
+    style Start fill:#0078D4,color:#fff
+    style Step3 fill:#107C10,color:#fff
+    style Step6 fill:#7FBA00,color:#fff
+```
+
 ### For RHEL/Rocky Linux/AlmaLinux VMs
 
 Complete setup instructions for configuring a client VM to use the Azure Blob RPM repository:
@@ -597,6 +743,36 @@ hello-azure --info
 ### For Azure VMs with Managed Identity
 
 Azure VMs with Managed Identity can authenticate without storing credentials:
+
+#### Managed Identity Architecture
+
+```mermaid
+graph LR
+    subgraph "Azure VM"
+        VM["VM with Managed Identity"]
+        AzCLI2["az login --identity"]
+        PluginVM["dnf-plugin-azure-auth"]
+    end
+
+    subgraph "Azure Platform"
+        IMDS["Instance Metadata<br/>Service (IMDS)"]
+        AAD2["Microsoft Entra ID"]
+    end
+
+    subgraph "Azure Storage"
+        BlobVM["Blob Container<br/>(rpm-repo)"]
+    end
+
+    VM --> AzCLI2
+    AzCLI2 --> IMDS
+    IMDS --> AAD2
+    AAD2 -- "JWT Token" --> PluginVM
+    PluginVM -- "Bearer Token +<br/>Storage Blob Data Reader" --> BlobVM
+
+    style VM fill:#0078D4,color:#fff
+    style IMDS fill:#FFB900,color:#000
+    style BlobVM fill:#7FBA00,color:#fff
+```
 
 ```bash
 # ============================================================

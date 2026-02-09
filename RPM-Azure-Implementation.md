@@ -40,66 +40,58 @@ This guide provides a comprehensive implementation for hosting RPM packages on A
 
 ### High-Level Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              AZURE CLOUD                                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   ┌────────────────────┐          ┌─────────────────────────────────────┐   │
-│   │   Azure AD         │          │     AZURE STORAGE ACCOUNT           │   │
-│   │                    │          │   ┌─────────────────────────────┐   │   │
-│   │  ┌──────────────┐  │   RBAC   │   │  BLOB CONTAINER (rpm-repo)  │   │   │
-│   │  │ Users        │──┼──────────┼──▶│                             │   │   │
-│   │  │ Groups       │  │          │   │  ├── el9/x86_64/            │   │   │
-│   │  │ Service      │  │          │   │  │   ├── Packages/          │   │   │
-│   │  │ Principals   │  │          │   │  │   │   └── *.rpm          │   │   │
-│   │  │ Managed IDs  │  │          │   │  │   └── repodata/          │   │   │
-│   │  └──────────────┘  │          │   │  │       └── repomd.xml     │   │   │
-│   │                    │          │   │  └── el8/x86_64/            │   │   │
-│   └────────────────────┘          │   │      └── ...                │   │   │
-│            │                      │   └─────────────────────────────┘   │   │
-│            │ Token                │                    ▲                │   │
-│            ▼                      └────────────────────│────────────────┘   │
-│                                                        │                    │
-└────────────────────────────────────────────────────────│────────────────────┘
-                                                         │
-            ┌────────────────────────────────────────────┴─────────┐
-            │                                                      │
-            ▼                                                      ▼
-┌───────────────────────────────────┐          ┌───────────────────────────────┐
-│    CI/CD Pipeline                 │          │    Client Systems             │
-│   (Azure DevOps)                  │          │   (RHEL/Rocky/Alma/Fedora)    │
-│                                   │          │                               │
-│  ┌─────────────────────────────┐  │          │  ┌─────────────────────────┐  │
-│  │ 1. az login (Service Princ) │  │          │  │ az login                │  │
-│  │ 2. Build RPMs               │  │          │  │ (or --identity for VMs) │  │
-│  │ 3. createrepo_c             │  │          │  └───────────┬─────────────┘  │
-│  │ 4. az storage blob upload   │  │          │              │                │
-│  │    --auth-mode login        │  │          │              ▼                │
-│  └─────────────────────────────┘  │          │  ┌─────────────────────────┐  │
-│                                   │          │  │ dnf-plugin-azure-auth   │  │
-│  Role: Storage Blob Data          │          │  │ (auto-injects tokens)   │  │
-│        Contributor                │          │  └───────────┬─────────────┘  │
-└───────────────────────────────────┘          │              │                │
-                                               │              ▼                │
-                                               │  ┌─────────────────────────┐  │
-                                               │  │ dnf install package     │  │
-                                               │  │ → HTTP + Bearer token   │  │
-                                               │  └─────────────────────────┘  │
-                                               │                               │
-                                               │  Role: Storage Blob Data      │
-                                               │        Reader                 │
-                                               └───────────────────────────────┘
+```mermaid
+graph TB
+    subgraph "Azure Cloud"
+        AAD["Microsoft Entra ID<br/>(Azure AD)"]
+        subgraph SA["Azure Storage Account"]
+            subgraph BC["Blob Container (rpm-repo)"]
+                EL9["el9/x86_64/<br/>Packages/ + repodata/"]
+                EL8["el8/x86_64/<br/>Packages/ + repodata/"]
+            end
+        end
+    end
+
+    subgraph CICD["CI/CD Pipeline (Azure DevOps)"]
+        Login1["1. az login<br/>(Service Principal)"]
+        Build["2. Build RPMs"]
+        Createrepo["3. createrepo_c"]
+        UploadBlob["4. az storage blob upload<br/>(--auth-mode login)"]
+        Login1 --> Build --> Createrepo --> UploadBlob
+    end
+
+    subgraph Client["Client Systems (RHEL/Rocky/Alma/Fedora)"]
+        AZLogin["az login<br/>(or --identity for VMs)"]
+        Plugin["dnf-plugin-azure-auth<br/>(auto-injects tokens)"]
+        DNFInstall["dnf install package<br/>→ HTTP + Bearer token"]
+        AZLogin --> Plugin --> DNFInstall
+    end
+
+    UploadBlob -- "Storage Blob Data<br/>Contributor" --> BC
+    AZLogin -- "Request token" --> AAD
+    AAD -- "JWT Token" --> Plugin
+    DNFInstall -- "Storage Blob Data<br/>Reader" --> BC
+
+    style AAD fill:#0078D4,color:#fff
+    style SA fill:#0078D4,color:#fff
+    style CICD fill:#F25022,color:#fff
+    style Client fill:#107C10,color:#fff
 ```
 
 ### Repository URL Structure
 
-```
-https://<storage-account>.blob.core.windows.net/<container>/<os-version>/<arch>/
-                                                     │           │        │
-                                                     │           │        └── x86_64, aarch64
-                                                     │           └── el8, el9
-                                                     └── rpm-repo
+```mermaid
+graph LR
+    URL["https://&lt;storage-account&gt;.blob.core.windows.net"]
+    URL --> Container["/rpm-repo"]
+    Container --> OS["/el8 or /el9"]
+    OS --> Arch["/x86_64 or /aarch64"]
+    Arch --> Packages["/Packages/*.rpm"]
+    Arch --> Repodata["/repodata/repomd.xml"]
+
+    style URL fill:#0078D4,color:#fff
+    style Container fill:#F25022,color:#fff
+    style OS fill:#7FBA00,color:#fff
 ```
 
 ---
@@ -128,26 +120,18 @@ This solution uses Azure AD (Entra ID) authentication exclusively. No SAS tokens
 
 ### Authentication Flow
 
-```
-┌────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  Client        │───▶│  Azure AD       │───▶│  Azure Blob     │
-│  (dnf/yum)     │    │  Token Service  │    │  Storage        │
-└────────────────┘    └─────────────────┘    └─────────────────┘
-        │                     │                      │
-        │  1. Request token   │                      │
-        │  ──────────────────▶│                      │
-        │                     │                      │
-        │  2. Return JWT      │                      │
-        │  ◀──────────────────│                      │
-        │                     │                      │
-        │  3. HTTP + Bearer token                    │
-        │  ─────────────────────────────────────────▶│
-        │                     │                      │
-        │  4. Validate token, check RBAC             │
-        │  ◀─────────────────────────────────────────│
-        │                     │                      │
-        │  5. Return blob content                    │
-        │  ◀─────────────────────────────────────────│
+```mermaid
+sequenceDiagram
+    participant Client as Client (dnf/yum)
+    participant AAD as Microsoft Entra ID<br/>Token Service
+    participant Blob as Azure Blob Storage
+
+    Client->>AAD: 1. Request OAuth 2.0 token<br/>(az account get-access-token)
+    AAD-->>Client: 2. Return JWT access token
+    Client->>Blob: 3. HTTP GET + Authorization: Bearer <token><br/>+ x-ms-version: 2022-11-02
+    Blob->>AAD: 4. Validate token + check RBAC role
+    AAD-->>Blob: 5. Authorization result
+    Blob-->>Client: 6. Return blob content (RPM/repodata)
 ```
 
 ### RBAC Roles
@@ -263,6 +247,42 @@ source .env.generated
 
 The `dnf-plugin-azure-auth` package provides automatic Azure AD token injection for DNF/YUM.
 
+### Plugin Decision Flow
+
+```mermaid
+flowchart TD
+    Start["DNF starts repo operation"]
+    Start --> LoadPlugin["Load azure_auth plugin"]
+    LoadPlugin --> ReadConf["Read /etc/dnf/plugins/azure_auth.conf"]
+    ReadConf --> CheckRepo{"Repo ID in<br/>config sections?"}
+
+    CheckRepo -- No --> Skip["Skip - no auth needed"]
+    CheckRepo -- Yes --> CheckEnv{"DNF_PLUGIN_AZURE_AUTH_TOKEN<br/>env var set?"}
+
+    CheckEnv -- Yes --> UseEnv["Use pre-generated token"]
+    CheckEnv -- No --> CheckSudo{"Running under<br/>sudo?"}
+
+    CheckSudo -- Yes --> RunUser["runuser -u $SUDO_USER --<br/>az account get-access-token"]
+    CheckSudo -- No --> AzDirect["az account get-access-token<br/>--resource https://storage.azure.com"]
+
+    RunUser --> TokenOK{"Token<br/>obtained?"}
+    AzDirect --> TokenOK
+
+    RunUser -- "Fails" --> FallbackAz["Retry as current user<br/>az account get-access-token"]
+    FallbackAz --> TokenOK
+
+    TokenOK -- Yes --> SetHeaders["Set HTTP headers:<br/>Authorization: Bearer token<br/>x-ms-version: 2022-11-02"]
+    TokenOK -- No --> Warn["Log warning:<br/>Failed to get Azure AD token"]
+    UseEnv --> SetHeaders
+
+    SetHeaders --> Request["DNF makes authenticated<br/>HTTP request to Azure Blob"]
+
+    style Start fill:#0078D4,color:#fff
+    style SetHeaders fill:#107C10,color:#fff
+    style Warn fill:#F25022,color:#fff
+    style UseEnv fill:#7FBA00,color:#fff
+```
+
 ### How It Works
 
 1. Plugin loads and identifies repositories with `*.blob.core.windows.net` URLs
@@ -278,7 +298,7 @@ The `dnf-plugin-azure-auth` package provides automatic Azure AD token injection 
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `azure_auth.py` | `/usr/lib/python3/dist-packages/dnf-plugins/` | Plugin code |
+| `azure_auth.py` | `/usr/lib/python3/site-packages/dnf-plugins/` | Plugin code |
 | `azure_auth.conf` | `/etc/dnf/plugins/` | Plugin configuration |
 
 ### Configuration Format
@@ -375,6 +395,36 @@ dnf install -y hello-azure
 
 ## CI/CD Integration
 
+### Pipeline Architecture
+
+```mermaid
+graph LR
+    subgraph "Source Control"
+        Push["Push to main"]
+    end
+
+    subgraph "CI/CD Pipeline"
+        Login["Azure Login<br/>(Service Principal)"]
+        InstallTools["Install Build Tools<br/>(rpm, createrepo_c)"]
+        BuildRPMs["Build RPMs<br/>(rpmbuild -bb)"]
+        CreateRepo["Create Repo Metadata<br/>(createrepo_c)"]
+        UploadAz["Upload to Azure Blob<br/>(az storage blob upload)"]
+
+        Login --> InstallTools --> BuildRPMs --> CreateRepo --> UploadAz
+    end
+
+    subgraph "Azure"
+        BlobCI["Azure Blob Storage<br/>(rpm-repo)"]
+    end
+
+    Push --> Login
+    UploadAz -- "Bearer Token +<br/>Storage Blob Data Contributor" --> BlobCI
+
+    style Push fill:#F25022,color:#fff
+    style BuildRPMs fill:#FFB900,color:#000
+    style BlobCI fill:#0078D4,color:#fff
+```
+
 ### Azure DevOps Pipeline Example
 
 ```yaml
@@ -460,6 +510,37 @@ jobs:
 ---
 
 ## Troubleshooting
+
+### Diagnostic Decision Tree
+
+```mermaid
+flowchart TD
+    Error["DNF fails to access<br/>Azure Blob repo"]
+    Error --> Check1{"az account show<br/>succeeds?"}
+
+    Check1 -- No --> Fix1["Run: az login<br/>or az login --identity"]
+    Check1 -- Yes --> Check2{"az account get-access-token<br/>--resource https://storage.azure.com<br/>returns token?"}
+
+    Check2 -- No --> Fix2["Check subscription<br/>and Azure AD permissions"]
+    Check2 -- Yes --> Check3{"curl with Bearer token<br/>returns HTTP 200?"}
+
+    Check3 -- No --> Check4{"HTTP 403?"}
+    Check3 -- Yes --> Fix5["Check plugin config:<br/>/etc/dnf/plugins/azure_auth.conf<br/>and repo file in /etc/yum.repos.d/"]
+
+    Check4 -- Yes --> Fix3["Assign RBAC role:<br/>Storage Blob Data Reader"]
+    Check4 -- No --> Check5{"HTTP 404?"}
+
+    Check5 -- Yes --> Fix4["Verify blob path exists:<br/>az storage blob list"]
+    Check5 -- No --> Fix6["Check storage account name<br/>and network rules"]
+
+    style Error fill:#F25022,color:#fff
+    style Fix1 fill:#FFB900,color:#000
+    style Fix2 fill:#FFB900,color:#000
+    style Fix3 fill:#FFB900,color:#000
+    style Fix4 fill:#FFB900,color:#000
+    style Fix5 fill:#FFB900,color:#000
+    style Fix6 fill:#FFB900,color:#000
+```
 
 ### Common Errors
 
