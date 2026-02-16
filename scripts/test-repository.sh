@@ -202,14 +202,14 @@ run_tests() {
     log_info "Listing packages in repository..."
     
     if $VERBOSE; then
-        list_blobs "${REPO_PATH}/Packages/"
+        list_blobs "${REPO_PATH}/"
     fi
     
     local pkg_count
     pkg_count=$(az storage blob list \
         --account-name "$AZURE_STORAGE_ACCOUNT" \
         --container-name "$AZURE_STORAGE_CONTAINER" \
-        --prefix "${REPO_PATH}/Packages/" \
+        --prefix "${REPO_PATH}/" \
         --auth-mode login \
         --query "length([?ends_with(name, '.rpm')])" \
         -o tsv 2>/dev/null || echo "0")

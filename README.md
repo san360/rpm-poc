@@ -70,12 +70,16 @@ graph TB
         end
     end
 
-    subgraph CICD["CI/CD Pipeline (Azure DevOps)"]
-        Login1["1. az login<br/>(Service Principal)"]
-        Build["2. Build RPMs"]
-        Createrepo["3. createrepo_c"]
-        UploadBlob["4. az storage blob upload<br/>(--auth-mode login)"]
-        Login1 --> Build --> Createrepo --> UploadBlob
+    subgraph Local["Local / Build Machine"]
+        Build["1. Build RPMs<br/>(rpmbuild -bb)"]
+        Createrepo["2. createrepo_c<br/>(generate repo metadata locally)"]
+        Build --> Createrepo
+    end
+
+    subgraph CICD["CI/CD or Manual Upload"]
+        Login1["3. az login<br/>(Service Principal / Interactive)"]
+        UploadBlob["4. az storage blob upload-batch<br/>(--auth-mode login)<br/>Uploads RPMs + repodata/"]
+        Login1 --> UploadBlob
     end
 
     subgraph Client["Client Systems (RHEL/Rocky/Alma/Fedora)"]
@@ -85,6 +89,7 @@ graph TB
         AZLogin --> Plugin --> DNFInstall
     end
 
+    Createrepo --> UploadBlob
     UploadBlob -- "Storage Blob Data<br/>Contributor" --> BC
     AZLogin -- "Request token" --> AAD
     AAD -- "JWT Token" --> Plugin
@@ -92,9 +97,23 @@ graph TB
 
     style AAD fill:#0078D4,color:#fff
     style SA fill:#0078D4,color:#fff
+    style Local fill:#FFB900,color:#000
     style CICD fill:#F25022,color:#fff
     style Client fill:#107C10,color:#fff
 ```
+
+> **`createrepo_c` — Repository Metadata Generator**
+>
+> After RPM packages are built locally, `createrepo_c` scans the `packages/` directory and generates the `repodata/` metadata that DNF/YUM clients need to discover and install packages. This runs **locally on the build machine** (or in a build container), _before_ anything is uploaded to Azure Blob Storage. The generated metadata files include:
+>
+> | File | Purpose |
+> |------|---------|
+> | `repomd.xml` | Master index — DNF reads this first to locate all other metadata files |
+> | `primary.xml.gz` | Package names, versions, architectures, dependencies, and descriptions |
+> | `filelists.xml.gz` | Complete file listing for every package in the repository |
+> | `other.xml.gz` | Changelog entries for each package |
+>
+> **How it fits in the workflow:** `build-rpm-local.sh all` runs `rpmbuild` to produce `.rpm` files, then immediately runs `createrepo_c ./packages` to generate the metadata alongside them. The entire `packages/` directory (RPMs + `repodata/`) is then uploaded as-is to Azure Blob Storage by `upload-to-azure.sh`. Client machines never need to run `createrepo_c` — they simply point DNF at the blob URL and consume the pre-built metadata.
 
 ### Repository URL Structure
 
